@@ -1,0 +1,33 @@
+[project]
+name = "scoto-backend"
+version = "0.1.0"
+description = "Internal ERP Backend for Attendance, Payroll, and Accounts"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi>=0.110.0",
+    "uvicorn[standard]>=0.28.0",
+    "sqlalchemy>=2.0.28",
+    "pymysql>=1.1.0",
+    "cryptography>=42.0.0",
+    "alembic>=1.13.1",
+    "pydantic-settings>=2.2.0",
+    "python-dotenv>=1.0.1",
+    "python-jose[cryptography]>=3.3.0",
+    "passlib[bcrypt]>=1.7.4",
+    "bcrypt==4.0.1",
+    "python-multipart>=0.0.9",
+]
+
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+# Linter & Formatter configuration (Ruff)
+[tool.ruff]
+line-length = 88
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B"]
+ignore = ["B008"] # Allows FastAPI Depends() in function defaults

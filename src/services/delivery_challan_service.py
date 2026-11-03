@@ -72,6 +72,7 @@ class DeliveryChallanService:
         db: Session,
         search: Optional[str] = None,
         return_type: Optional[str] = None,
+        fin_year: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
         conditions = []
         params: Dict[str, Any] = {}
@@ -90,6 +91,53 @@ class DeliveryChallanService:
         if return_type:
             conditions.append("Returntype = :return_type")
             params["return_type"] = return_type
+
+        if fin_year and fin_year.upper() != "ALL":
+
+
+            parts = fin_year.replace('-', '_').split('_')
+
+
+            if len(parts) == 2 and len(parts[0]) == 4 and len(parts[1]) == 4:
+
+
+                start_d = f"{parts[0]}-04-01"
+
+
+                end_d = f"{parts[1]}-03-31"
+
+
+                short_fy = f"{parts[0][2:]}-{parts[1][2:]}"
+
+
+                conditions.append("""(
+
+
+                    (TRY_CAST(Deliverydate AS DATE) >= :start_d AND TRY_CAST(Deliverydate AS DATE) <= :end_d)
+
+
+                    OR Deliveryno LIKE :short_fy
+
+
+                )""")
+
+
+                params["start_d"] = start_d
+
+
+                params["end_d"] = end_d
+
+
+                params["short_fy"] = f"%{short_fy}%"
+
+
+            else:
+
+
+                conditions.append("Deliveryno LIKE :fy")
+
+
+                params["fy"] = f"%{fin_year}%"
 
         where_clause = (
             "WHERE " + " AND ".join(conditions)

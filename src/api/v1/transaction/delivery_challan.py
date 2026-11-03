@@ -22,12 +22,14 @@ router = APIRouter(
 def get_delivery_challans(
     search: Optional[str] = Query(default=None),
     return_type: Optional[str] = Query(default=None),
+    fin_year: Optional[str] = Query(default=None),
     db: Session = Depends(get_mssql_session("db2")),
 ):
     data = DeliveryChallanService.get_all(
         db=db,
         search=search,
         return_type=return_type,
+        fin_year=fin_year,
     )
 
     return {

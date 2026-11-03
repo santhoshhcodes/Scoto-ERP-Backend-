@@ -112,6 +112,7 @@ class QuotationService:
         db: Session,
         search: str | None = None,
         status: str | None = None,
+        fin_year: str | None = None,
     ):
 
         QuotationService.ensure_tables_exist(db)
@@ -119,6 +120,8 @@ class QuotationService:
         query = """
             SELECT
                 TransNo,
+                FinYearVal,
+                FinYearCode,
                 CONVERT(VARCHAR(10), TransDate, 120) AS TransDate,
                 Product AS ProdType,
                 SuppCode AS CustomerCode,
@@ -157,6 +160,89 @@ class QuotationService:
                 AND ApprovalStatus = :status
             """
             params["status"] = status
+
+        if fin_year and fin_year.upper() != "ALL":
+
+
+            fy_dash = fin_year.replace("_", "-").strip()
+
+
+            fy_under = fin_year.replace("-", "_").strip()
+
+
+            parts = fy_dash.split("-")
+
+
+            if len(parts) == 2 and len(parts[0]) == 4 and len(parts[1]) == 4:
+
+
+                start_d = f"{parts[0]}-04-01"
+
+
+                end_d = f"{parts[1]}-03-31"
+
+
+                query += """
+
+
+                    AND (
+
+
+                        REPLACE(LTRIM(RTRIM(FinYearVal)), '_', '-') = :fy_dash
+
+
+                        OR REPLACE(LTRIM(RTRIM(FinYearVal)), '-', '_') = :fy_under
+
+
+                        OR FinYearCode = :fin_year
+
+
+                        OR (
+
+
+                            TRY_CAST(TransDate AS DATE) >= :start_d
+
+
+                            AND TRY_CAST(TransDate AS DATE) <= :end_d
+
+
+                        )
+
+
+                    )
+
+
+                """
+
+
+                params["fy_dash"] = fy_dash
+
+
+                params["fy_under"] = fy_under
+
+
+                params["fin_year"] = fin_year
+
+
+                params["start_d"] = start_d
+
+
+                params["end_d"] = end_d
+
+
+            else:
+
+
+                query += """
+
+
+                    AND (FinYearVal = :fin_year OR FinYearCode = :fin_year)
+
+
+                """
+
+
+                params["fin_year"] = fin_year
 
         results = (
             db.execute(

@@ -93,6 +93,7 @@ def get_tally_transactions(
     voucher_type: Optional[str] = Query(default=None, description="Filter by voucher type (Sales, Receipt, Payment, etc.)"),
     from_date: Optional[str] = Query(default=None, description="From date (YYYY-MM-DD or YYYYMMDD)"),
     to_date: Optional[str] = Query(default=None, description="To date (YYYY-MM-DD or YYYYMMDD)"),
+    fin_year: Optional[str] = Query(default=None, description="Financial Year filter"),
     db2: Session = Depends(get_mssql_session("db2")),
 ):
     """
@@ -106,6 +107,7 @@ def get_tally_transactions(
         trans_type=voucher_type,
         from_date=from_date,
         to_date=to_date,
+        fin_year=fin_year,
     )
 
 

@@ -1,3 +1,5 @@
+import sys
+import asyncio
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -29,6 +31,24 @@ app.include_router(api_router, prefix="/api/v1")
 # Register hardware biometric push protocol endpoints (ADMS / iclock listeners)
 app.include_router(iclock_router, prefix="/iclock")
 app.include_router(iclock_router)
+
+
+@app.on_event("startup")
+def configure_asyncio_windows():
+    """Suppresses harmless Windows WinError 10054 transport disconnect exceptions."""
+    if sys.platform == "win32":
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = asyncio.get_event_loop()
+
+        def _ignore_winerror_10054(loop, context):
+            exc = context.get("exception")
+            if isinstance(exc, ConnectionResetError):
+                return
+            loop.default_exception_handler(context)
+
+        loop.set_exception_handler(_ignore_winerror_10054)
 
 
 @app.get("/health", tags=["Health"])

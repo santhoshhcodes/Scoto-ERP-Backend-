@@ -18,7 +18,7 @@ class Settings(BaseSettings):
 
     # Direct map of dynamic keys
     DB_KEY_DB1: str = "etimetracklite1"
-    DB_KEY_DB2: str = "SCOTO_ACC_ERP"
+    DB_KEY_DB2: str = "Scoto_Admin_ERP"
 
 
     # MySQL Core ERP

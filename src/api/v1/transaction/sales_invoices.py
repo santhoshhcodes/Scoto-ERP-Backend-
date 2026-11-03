@@ -22,12 +22,14 @@ def list_sales_invoices(
     status: Optional[str] = Query(default=None, description="ALL, Approved, or Pending"),
     company_code: Optional[str] = Query(default="SCT"),
     location_code: Optional[str] = Query(default="UNIT I"),
+    fin_year: Optional[str] = Query(default=None, description="Financial Year filter"),
     db: Session = Depends(get_mssql_session("db2")),
 ):
     service.ensure_sales_invoice_tables_exist(db)
     return service.get_sales_invoices(
         db=db, search=search, approval_status=status,
         company_code=company_code, location_code=location_code,
+        fin_year=fin_year,
     )
 
 

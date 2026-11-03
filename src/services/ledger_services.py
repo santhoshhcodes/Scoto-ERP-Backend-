@@ -1,9 +1,102 @@
-
+from datetime import datetime
+from decimal import Decimal
 from fastapi import HTTPException
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from src.schemas.master import LedgerCreate, LedgerUpdate
+
+
+def _sync_opening_balance_transaction(
+    db: Session,
+    ledger_code: str,
+    ledger_name: str,
+    opening_balance: float | Decimal | str | None,
+    balance_type: str | None,
+):
+    """
+    Syncs the opening balance entry into dbo.Acc_Trans_All
+    matching legacy accounting journal format.
+    """
+    try:
+        amt = Decimal(str(opening_balance or 0))
+    except Exception:
+        amt = Decimal(0)
+
+    b_type = (balance_type or "Cr").strip()
+    cr_amt = amt if b_type == "Cr" else Decimal(0)
+    dr_amt = amt if b_type == "Dr" else Decimal(0)
+
+    # Check if an Opening Balance record already exists for this ledger
+    existing_trans = db.execute(
+        text("""
+            SELECT TOP 1 TransNo
+            FROM dbo.Acc_Trans_All
+            WHERE TransType = 'Opening Balance'
+              AND LeaderCode = :code
+              AND Status <> 'Delete'
+        """),
+        {"code": ledger_code},
+    ).first()
+
+    if existing_trans:
+        if amt > 0:
+            db.execute(
+                text("""
+                    UPDATE dbo.Acc_Trans_All
+                    SET
+                        LedgerName = :name,
+                        CreditAmount = :cr,
+                        DebitAmount = :dr,
+                        Status = 'Active'
+                    WHERE TransNo = :trans_no
+                """),
+                {
+                    "trans_no": existing_trans[0],
+                    "name": ledger_name,
+                    "cr": cr_amt,
+                    "dr": dr_amt,
+                },
+            )
+        else:
+            db.execute(
+                text("""
+                    UPDATE dbo.Acc_Trans_All
+                    SET Status = 'Delete'
+                    WHERE TransNo = :trans_no
+                """),
+                {"trans_no": existing_trans[0]},
+            )
+    elif amt > 0:
+        year_str = datetime.now().strftime("%y")
+        next_year_str = str(int(year_str) + 1)
+        trans_no = f"O-BAL/{year_str}-{next_year_str}/{ledger_code}"
+
+        db.execute(
+            text("""
+                INSERT INTO dbo.Acc_Trans_All (
+                    CCode, LCode, FinYearCode, FinYearVal,
+                    TransNo, TransDate, LeaderCode, LedgerName,
+                    AccHeadCode, AccHeadName, TransType,
+                    CreditAmount, DebitAmount, Status,
+                    UserId, UserName, CreatedBy
+                )
+                VALUES (
+                    'SCT', 'UNIT I', '01', CONVERT(VARCHAR(4), CASE WHEN MONTH(GETDATE()) >= 4 THEN YEAR(GETDATE()) ELSE YEAR(GETDATE()) - 1 END) + '_' + CONVERT(VARCHAR(4), CASE WHEN MONTH(GETDATE()) >= 4 THEN YEAR(GETDATE()) + 1 ELSE YEAR(GETDATE()) END),
+                    :trans_no, CONVERT(VARCHAR(10), GETDATE(), 103),
+                    :code, :name, '', '', 'Opening Balance',
+                    :cr, :dr, 'Add', 'ADMIN', 'Super Admin',
+                    CONVERT(VARCHAR(30), GETDATE(), 100)
+                )
+            """),
+            {
+                "trans_no": trans_no,
+                "code": ledger_code,
+                "name": ledger_name,
+                "cr": cr_amt,
+                "dr": dr_amt,
+            },
+        )
 
 
 def get_ledgers(
@@ -22,18 +115,40 @@ def get_ledgers(
             CostCenter,
             Status,
             'General Ledger' AS LedgerType,
+            '' AS Ledger_Class,
+            'Domestic' AS Region,
+            '' AS HouseNo,
+            '' AS Add1,
+            '' AS Add2,
+            '' AS Area,
+            '' AS City,
+            '' AS PinCode,
+            '' AS State,
+            'India' AS Country,
+            '' AS MobileNo,
+            '' AS TelNo,
+            '' AS ContectName,
+            '' AS ContectNo,
+            '' AS MailID,
+            '' AS WebSite,
             '' AS BankName,
             '' AS AccountNo,
-            '' AS IFSCCode,
             '' AS BranchName,
+            '' AS Branch_Addr,
+            '' AS IFSCCode,
+            '' AS SWIFTCode,
+            '' AS IBANCode,
             '' AS GSTNo,
             '' AS PanNo,
-            '' AS City,
-            '' AS State,
-            '' AS MobileNo,
-            '' AS MailID,
-            0 AS OpeningBalance,
-            'Dr' AS BalanceType
+            '' AS TanNo,
+            '' AS CINNo,
+            '' AS IECode,
+            '' AS LEICode,
+            '' AS MSME_Status,
+            '' AS MSME_No,
+            '30' AS PaymentDays,
+            COALESCE(OpeningBalance, 0) AS OpeningBalance,
+            COALESCE(BalanceType, 'Dr') AS BalanceType
         FROM dbo.Acc_Mst_GeneralLedger
         WHERE Status <> 'Delete'
 
@@ -49,18 +164,40 @@ def get_ledgers(
             '' AS CostCenter,
             Status,
             LedgerType,
+            Ledger_Class,
+            Region,
+            HouseNo,
+            Add1,
+            Add2,
+            Area,
+            City,
+            PinCode,
+            State,
+            Country,
+            MobileNo,
+            TelNo,
+            ContectName,
+            ContectNo,
+            MailID,
+            WebSite,
             BankName,
             AccountNo,
-            IFSCCode,
             BranchName,
+            Branch_Addr,
+            IFSCCode,
+            SWIFTCode,
+            IBANCode,
             GSTNo,
             PanNo,
-            City,
-            State,
-            MobileNo,
-            MailID,
-            0 AS OpeningBalance,
-            'Cr' AS BalanceType
+            TanNo,
+            CINNo,
+            IECode,
+            LEICode,
+            MSME_Status,
+            MSME_No,
+            PaymentDays,
+            COALESCE(OpeningBalance, 0) AS OpeningBalance,
+            COALESCE(BalanceType, 'Cr') AS BalanceType
         FROM dbo.Acc_Mst_Ledger
         WHERE Status <> 'Delete'
     """
@@ -154,6 +291,13 @@ def create_ledger(db: Session, payload: LedgerCreate):
         )
 
     try:
+        opening_bal = Decimal(str(payload.OpeningBalance or 0))
+    except Exception:
+        opening_bal = Decimal(0)
+
+    balance_type = payload.BalanceType or ("Dr" if payload.LedgerType == "General Ledger" else "Cr")
+
+    try:
         if payload.LedgerType == "General Ledger":
             insert_sql = """
                 INSERT INTO dbo.Acc_Mst_GeneralLedger (
@@ -164,7 +308,8 @@ def create_ledger(db: Session, payload: LedgerCreate):
                     AccLedgerHeaderCode, AccLedgerHeaderName,
                     AccGenLdgCode, AccGenLdgName,
                     CostCenter, Status,
-                    SysIp, SysName, UserID, UserName, CreateOn
+                    SysIp, SysName, UserID, UserName, CreateOn,
+                    OpeningBalance, BalanceType
                 )
                 VALUES (
                     '01', '01',
@@ -175,7 +320,8 @@ def create_ledger(db: Session, payload: LedgerCreate):
                     :ledger_code, :ledger_name,
                     :cost_center, 'Add',
                     '127.0.0.1', 'API_SERVER',
-                    'ADMIN', 'Super Admin', GETDATE()
+                    'ADMIN', 'Super Admin', GETDATE(),
+                    :opening_bal, :balance_type
                 )
             """
 
@@ -188,6 +334,8 @@ def create_ledger(db: Session, payload: LedgerCreate):
                     "ledger_code": ledger_code,
                     "ledger_name": ledger_name,
                     "cost_center": payload.CostCenter or "Cost Centre",
+                    "opening_bal": opening_bal,
+                    "balance_type": balance_type,
                 },
             )
 
@@ -209,7 +357,8 @@ def create_ledger(db: Session, payload: LedgerCreate):
                     AccountTypeCode, AccountType, PaymentBlock,
                     SupplierBlock, RoundOff, Status, IsActive,
                     Approval_Status, SysIp, SysName, UserID,
-                    UserName, CreateOn, LedgerType
+                    UserName, CreateOn, LedgerType,
+                    OpeningBalance, BalanceType
                 )
                 VALUES (
                     '01', '01', :ledger_code,
@@ -225,7 +374,8 @@ def create_ledger(db: Session, payload: LedgerCreate):
                     'No', '0', '', 'Standard', '', '', '', '',
                     'HDR-01', :acc_header, 'No', 'No', 'None',
                     'Add', '1', '0', '127.0.0.1', 'API_SERVER',
-                    'ADMIN', 'Super Admin', GETDATE(), :ledger_type
+                    'ADMIN', 'Super Admin', GETDATE(), :ledger_type,
+                    :opening_bal, :balance_type
                 )
             """
 
@@ -272,8 +422,19 @@ def create_ledger(db: Session, payload: LedgerCreate):
                         payload.AccLedgerHeaderName or "Liabilities"
                     ),
                     "ledger_type": payload.LedgerType or "Supplier",
+                    "opening_bal": opening_bal,
+                    "balance_type": balance_type,
                 },
             )
+
+        # Sync opening balance to Acc_Trans_All
+        _sync_opening_balance_transaction(
+            db=db,
+            ledger_code=ledger_code,
+            ledger_name=ledger_name,
+            opening_balance=opening_bal,
+            balance_type=balance_type,
+        )
 
         db.commit()
 
@@ -295,62 +456,175 @@ def update_ledger(
     ledger_code: str,
     payload: LedgerUpdate,
 ):
-    existing = db.execute(
+    # Check if Party Ledger or General Ledger
+    party_existing = db.execute(
         text("""
-            SELECT TOP 1 LedgerCode
+            SELECT TOP 1 LedgerCode, LedgerName
             FROM dbo.Acc_Mst_Ledger
             WHERE LedgerCode = :code
               AND Status <> 'Delete'
         """),
         {"code": ledger_code},
-    ).first()
+    ).mappings().first()
 
-    if not existing:
+    general_existing = None
+    if not party_existing:
+        general_existing = db.execute(
+            text("""
+                SELECT TOP 1 AccGenLdgCode, AccGenLdgName
+                FROM dbo.Acc_Mst_GeneralLedger
+                WHERE AccGenLdgCode = :code
+                  AND Status <> 'Delete'
+            """),
+            {"code": ledger_code},
+        ).mappings().first()
+
+    if not party_existing and not general_existing:
         raise HTTPException(
             status_code=404,
-            detail="Party ledger not found",
+            detail=f"Ledger '{ledger_code}' not found.",
         )
 
-    update_sql = """
-        UPDATE dbo.Acc_Mst_Ledger
-        SET
-            LedgerName = COALESCE(:ledger_name, LedgerName),
-            ChequePrintName = COALESCE(
-                :cheque_print_name, ChequePrintName
-            ),
-            BankName = COALESCE(:bank_name, BankName),
-            AccountNo = COALESCE(:account_no, AccountNo),
-            IFSCCode = COALESCE(:ifsc_code, IFSCCode),
-            BranchName = COALESCE(:branch_name, BranchName),
-            GSTNo = COALESCE(:gst_no, GSTNo),
-            PanNo = COALESCE(:pan_no, PanNo),
-            City = COALESCE(:city, City),
-            State = COALESCE(:state, State),
-            MobileNo = COALESCE(:mobile_no, MobileNo),
-            MailID = COALESCE(:mail_id, MailID)
-        WHERE LedgerCode = :ledger_code
-          AND Status <> 'Delete'
-    """
+    opening_bal = None
+    if payload.OpeningBalance is not None:
+        try:
+            opening_bal = Decimal(str(payload.OpeningBalance))
+        except Exception:
+            opening_bal = Decimal(0)
 
     try:
-        db.execute(
-            text(update_sql),
-            {
-                "ledger_code": ledger_code,
-                "ledger_name": payload.LedgerName,
-                "cheque_print_name": payload.ChequePrintName,
-                "bank_name": payload.BankName,
-                "account_no": payload.AccountNo,
-                "ifsc_code": payload.IFSCCode,
-                "branch_name": payload.BranchName,
-                "gst_no": payload.GSTNo,
-                "pan_no": payload.PanNo,
-                "city": payload.City,
-                "state": payload.State,
-                "mobile_no": payload.MobileNo,
-                "mail_id": payload.MailID,
-            },
-        )
+        if party_existing:
+            update_sql = """
+                UPDATE dbo.Acc_Mst_Ledger
+                SET
+                    LedgerName = COALESCE(:ledger_name, LedgerName),
+                    ChequePrintName = COALESCE(:cheque_print_name, ChequePrintName),
+                    Ledger_Class = COALESCE(:ledger_class, Ledger_Class),
+                    Region = COALESCE(:region, Region),
+                    AccountType = COALESCE(:acc_header, AccountType),
+                    LedgerGrpName = COALESCE(:acc_grp, LedgerGrpName),
+                    HouseNo = COALESCE(:house_no, HouseNo),
+                    Add1 = COALESCE(:add1, Add1),
+                    Add2 = COALESCE(:add2, Add2),
+                    Area = COALESCE(:area, Area),
+                    City = COALESCE(:city, City),
+                    PinCode = COALESCE(:pincode, PinCode),
+                    State = COALESCE(:state, State),
+                    Country = COALESCE(:country, Country),
+                    MobileNo = COALESCE(:mobile_no, MobileNo),
+                    TelNo = COALESCE(:tel_no, TelNo),
+                    ContectName = COALESCE(:contect_name, ContectName),
+                    ContectNo = COALESCE(:contect_no, ContectNo),
+                    MailID = COALESCE(:mail_id, MailID),
+                    WebSite = COALESCE(:website, WebSite),
+                    BankName = COALESCE(:bank_name, BankName),
+                    AccountNo = COALESCE(:account_no, AccountNo),
+                    BranchName = COALESCE(:branch_name, BranchName),
+                    Branch_Addr = COALESCE(:branch_addr, Branch_Addr),
+                    IFSCCode = COALESCE(:ifsc_code, IFSCCode),
+                    SWIFTCode = COALESCE(:swift_code, SWIFTCode),
+                    IBANCode = COALESCE(:iban_code, IBANCode),
+                    GSTNo = COALESCE(:gst_no, GSTNo),
+                    PanNo = COALESCE(:pan_no, PanNo),
+                    TanNo = COALESCE(:tan_no, TanNo),
+                    CINNo = COALESCE(:cin_no, CINNo),
+                    IECode = COALESCE(:ie_code, IECode),
+                    LEICode = COALESCE(:lei_code, LEICode),
+                    MSME_Status = COALESCE(:msme_status, MSME_Status),
+                    MSME_No = COALESCE(:msme_no, MSME_No),
+                    PaymentDays = COALESCE(:payment_days, PaymentDays),
+                    OpeningBalance = COALESCE(:opening_bal, OpeningBalance),
+                    BalanceType = COALESCE(:balance_type, BalanceType),
+                    LedgerType = COALESCE(:ledger_type, LedgerType)
+                WHERE LedgerCode = :ledger_code
+                  AND Status <> 'Delete'
+            """
+
+            db.execute(
+                text(update_sql),
+                {
+                    "ledger_code": ledger_code,
+                    "ledger_name": payload.LedgerName,
+                    "cheque_print_name": payload.ChequePrintName,
+                    "ledger_class": payload.Ledger_Class,
+                    "region": payload.Region,
+                    "acc_header": payload.AccLedgerHeaderName,
+                    "acc_grp": payload.AccGroupName,
+                    "house_no": payload.HouseNo,
+                    "add1": payload.Add1,
+                    "add2": payload.Add2,
+                    "area": payload.Area,
+                    "city": payload.City,
+                    "pincode": payload.PinCode,
+                    "state": payload.State,
+                    "country": payload.Country,
+                    "mobile_no": payload.MobileNo,
+                    "tel_no": payload.TelNo,
+                    "contect_name": payload.ContectName,
+                    "contect_no": payload.ContectNo,
+                    "mail_id": payload.MailID,
+                    "website": payload.WebSite,
+                    "bank_name": payload.BankName,
+                    "account_no": payload.AccountNo,
+                    "branch_name": payload.BranchName,
+                    "branch_addr": payload.Branch_Addr,
+                    "ifsc_code": payload.IFSCCode,
+                    "swift_code": payload.SWIFTCode,
+                    "iban_code": payload.IBANCode,
+                    "gst_no": payload.GSTNo,
+                    "pan_no": payload.PanNo,
+                    "tan_no": payload.TanNo,
+                    "cin_no": payload.CINNo,
+                    "ie_code": payload.IECode,
+                    "lei_code": payload.LEICode,
+                    "msme_status": payload.MSME_Status,
+                    "msme_no": payload.MSME_No,
+                    "payment_days": payload.PaymentDays,
+                    "opening_bal": opening_bal,
+                    "balance_type": payload.BalanceType,
+                    "ledger_type": payload.LedgerType,
+                },
+            )
+
+            eff_name = payload.LedgerName or party_existing["LedgerName"]
+            eff_bal = opening_bal if opening_bal is not None else party_existing.get("OpeningBalance", 0)
+            eff_type = payload.BalanceType or party_existing.get("BalanceType", "Cr")
+            _sync_opening_balance_transaction(db, ledger_code, eff_name, eff_bal, eff_type)
+
+        else:
+            update_sql = """
+                UPDATE dbo.Acc_Mst_GeneralLedger
+                SET
+                    AccGenLdgName = COALESCE(:ledger_name, AccGenLdgName),
+                    AccLedgerHeaderName = COALESCE(:acc_header, AccLedgerHeaderName),
+                    AccGroupName = COALESCE(:acc_grp, AccGroupName),
+                    AccSubGrpName = COALESCE(:acc_sub_grp, AccSubGrpName),
+                    CostCenter = COALESCE(:cost_center, CostCenter),
+                    OpeningBalance = COALESCE(:opening_bal, OpeningBalance),
+                    BalanceType = COALESCE(:balance_type, BalanceType)
+                WHERE AccGenLdgCode = :ledger_code
+                  AND Status <> 'Delete'
+            """
+
+            db.execute(
+                text(update_sql),
+                {
+                    "ledger_code": ledger_code,
+                    "ledger_name": payload.LedgerName,
+                    "acc_header": payload.AccLedgerHeaderName,
+                    "acc_grp": payload.AccGroupName,
+                    "acc_sub_grp": payload.AccSubGroupName,
+                    "cost_center": payload.CostCenter,
+                    "opening_bal": opening_bal,
+                    "balance_type": payload.BalanceType,
+                },
+            )
+
+            eff_name = payload.LedgerName or general_existing["AccGenLdgName"]
+            eff_bal = opening_bal if opening_bal is not None else general_existing.get("OpeningBalance", 0)
+            eff_type = payload.BalanceType or general_existing.get("BalanceType", "Dr")
+            _sync_opening_balance_transaction(db, ledger_code, eff_name, eff_bal, eff_type)
+
         db.commit()
 
     except Exception:
@@ -391,6 +665,17 @@ def delete_ledger(db: Session, ledger_code: str):
                 status_code=404,
                 detail="Active ledger not found",
             )
+
+        # Also remove opening balance transaction
+        db.execute(
+            text("""
+                UPDATE dbo.Acc_Trans_All
+                SET Status = 'Delete'
+                WHERE TransType = 'Opening Balance'
+                  AND LeaderCode = :code
+            """),
+            {"code": ledger_code},
+        )
 
         db.commit()
 

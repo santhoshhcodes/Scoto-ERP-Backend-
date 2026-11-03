@@ -531,6 +531,7 @@ class TallyService:
         trans_type: Optional[str] = None,
         from_date: Optional[str] = None,
         to_date: Optional[str] = None,
+        fin_year: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
         Retrieves ingested transactions from dbo.Acc_Trans_All.
@@ -557,6 +558,31 @@ class TallyService:
             t_clean = to_date.replace("-", "").strip()
             where_clauses.append("TransDate <= :to_date")
             params["to_date"] = t_clean
+
+        if fin_year and fin_year.upper() != "ALL":
+            fy_dash = fin_year.replace("_", "-").strip()
+            fy_under = fin_year.replace("-", "_").strip()
+            parts = fy_dash.split("-")
+            if len(parts) == 2 and len(parts[0]) == 4 and len(parts[1]) == 4:
+                d_start = f"{parts[0]}0401"
+                d_end = f"{parts[1]}0331"
+                where_clauses.append("""(
+                    REPLACE(LTRIM(RTRIM(FinYearVal)), '_', '-') = :fy_dash
+                    OR REPLACE(LTRIM(RTRIM(FinYearVal)), '-', '_') = :fy_under
+                    OR FinYearCode = :fin_year
+                    OR (
+                        REPLACE(REPLACE(TransDate, '-', ''), '/', '') >= :d_start
+                        AND REPLACE(REPLACE(TransDate, '-', ''), '/', '') <= :d_end
+                    )
+                )""")
+                params["fy_dash"] = fy_dash
+                params["fy_under"] = fy_under
+                params["fin_year"] = fin_year
+                params["d_start"] = d_start
+                params["d_end"] = d_end
+            else:
+                where_clauses.append("(FinYearVal = :fin_year OR FinYearCode = :fin_year)")
+                params["fin_year"] = fin_year
 
         where_sql = " AND ".join(where_clauses)
 

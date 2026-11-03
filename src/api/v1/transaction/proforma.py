@@ -25,6 +25,7 @@ router = APIRouter(
 def get_proforma_invoices(
     search: Optional[str] = Query(default=None),
     status_filter: Optional[str] = Query(default=None, alias="status"),
+    fin_year: Optional[str] = Query(default=None, description="Financial Year filter"),
     db: Session = Depends(get_mssql_session("db2")),
 ):
     """Get all active proforma invoices with their items."""
@@ -32,6 +33,7 @@ def get_proforma_invoices(
         db=db,
         search=search,
         approval_status=status_filter,
+        fin_year=fin_year,
     )
 
     return {

@@ -98,7 +98,7 @@ def _insert_items(db: Session, trans_no: str, payload) -> None:
             GST, CGST, SGST, IGST, NetAmount, Status, UserName, Usercode,
             SysName, SysIp, CreateOn
         ) VALUES (
-            'SCT', 'UNIT I', '2', '2025_2026', :trans_no, :trans_date,
+            'SCT', 'UNIT I', '01', CONVERT(VARCHAR(4), CASE WHEN MONTH(GETDATE()) >= 4 THEN YEAR(GETDATE()) ELSE YEAR(GETDATE()) - 1 END) + '-' + CONVERT(VARCHAR(4), CASE WHEN MONTH(GETDATE()) >= 4 THEN YEAR(GETDATE()) + 1 ELSE YEAR(GETDATE()) END), :trans_no, :trans_date,
             :invoice_no, :invoice_date, :customer_code, :customer_name,
             :item_code, :product_type, :hsn_code, :qty, :rate, :item_value, :serial_no,
             :gst, :cgst, :sgst, :igst, :net_amount, 'Add', 'ADMIN', 'ADMIN',
@@ -129,7 +129,7 @@ def _insert_serials(db: Session, trans_no: str, payload) -> None:
             MaterialInventory, SerialNo, TransNo, TransDate, Status,
             UserName, UserCode, SysIp, SysName, CreateOn
         ) VALUES (
-            'SCT', 'UNIT I', '2', '2025_2026', :product_type, :hsn_code,
+            'SCT', 'UNIT I', '01', CONVERT(VARCHAR(4), CASE WHEN MONTH(GETDATE()) >= 4 THEN YEAR(GETDATE()) ELSE YEAR(GETDATE()) - 1 END) + '-' + CONVERT(VARCHAR(4), CASE WHEN MONTH(GETDATE()) >= 4 THEN YEAR(GETDATE()) + 1 ELSE YEAR(GETDATE()) END), :product_type, :hsn_code,
             :material_inv, :serial_no, :trans_no, :trans_date, 'Add',
             'ADMIN', 'ADMIN', '127.0.0.1', 'API_SERVER', CONVERT(VARCHAR(30), GETDATE(), 120)
         )
@@ -145,9 +145,10 @@ def _insert_serials(db: Session, trans_no: str, payload) -> None:
 def get_sales_invoices(
     db: Session, search: Optional[str] = None, approval_status: Optional[str] = None,
     company_code: Optional[str] = "SCT", location_code: Optional[str] = "UNIT I",
+    fin_year: Optional[str] = None,
 ):
     sql = """
-        SELECT TransNo, TransDate, InvoiceNo, InvoiceDate, CustomerCode, CustomerName,
+        SELECT TransNo, FinYearVal, FinYearCode, TransDate, InvoiceNo, InvoiceDate, CustomerCode, CustomerName,
                GRN, Remarks, TotalQty, TotalItemAmount, TotalCGSTAmount, TotalSGSTAmount,
                TotalIGSTAmount, TotalAmount, RoundType, RoundOff,
                NetAmount AS FinalNetAmount, Approval_Status,
@@ -176,6 +177,53 @@ def get_sales_invoices(
         else:
             sql += """ AND (Approval_Status = '0' OR Approval_Status = 'Pending'
                         OR Approval_Status IS NULL OR Approval_Status = '')"""
+    if fin_year and fin_year.upper() != "ALL":
+
+        fy_dash = fin_year.replace("_", "-").strip()
+
+        fy_under = fin_year.replace("-", "_").strip()
+
+        parts = fy_dash.split("-")
+
+        if len(parts) == 2 and len(parts[0]) == 4 and len(parts[1]) == 4:
+
+            start_d = f"{parts[0]}-04-01"
+
+            end_d = f"{parts[1]}-03-31"
+
+            sql += """ AND (
+
+                REPLACE(LTRIM(RTRIM(FinYearVal)), '_', '-') = :fy_dash
+
+                OR REPLACE(LTRIM(RTRIM(FinYearVal)), '-', '_') = :fy_under
+
+                OR FinYearCode = :fin_year
+
+                OR (
+
+                    TRY_CAST(TransDate AS DATE) >= :start_d
+
+                    AND TRY_CAST(TransDate AS DATE) <= :end_d
+
+                )
+
+            )"""
+
+            params["fy_dash"] = fy_dash
+
+            params["fy_under"] = fy_under
+
+            params["fin_year"] = fin_year
+
+            params["start_d"] = start_d
+
+            params["end_d"] = end_d
+
+        else:
+
+            sql += " AND (FinYearVal = :fin_year OR FinYearCode = :fin_year)"
+
+            params["fin_year"] = fin_year
     sql += " ORDER BY TransNo DESC"
     rows = db.execute(text(sql), params).mappings().all()
     data = []
@@ -201,7 +249,7 @@ def get_available_proforma_invoices(db: Session):
 
 def get_sales_invoice_by_no(db: Session, trans_no: str):
     header = db.execute(text("""
-        SELECT TransNo, TransDate, InvoiceNo, InvoiceDate, CustomerCode, CustomerName,
+        SELECT TransNo, FinYearVal, FinYearCode, TransDate, InvoiceNo, InvoiceDate, CustomerCode, CustomerName,
                GST, GRN, Remarks, TotalQty, TotalItemAmount, TotalCGSTAmount,
                TotalSGSTAmount, TotalIGSTAmount, TotalAmount, RoundType, RoundOff,
                NetAmount AS FinalNetAmount, Approval_Status,
@@ -255,7 +303,7 @@ def create_sales_invoice(db: Session, payload):
                 RoundOff, NetAmount, GRN, Remarks, UserName, UserCode, SysIp, SysName,
                 CreateOn, Approval_Status, Status
             ) VALUES (
-                'SCT', 'UNIT I', '2', '2025_2026', :trans_no, :trans_date, :invoice_no,
+                'SCT', 'UNIT I', '01', CONVERT(VARCHAR(4), CASE WHEN MONTH(GETDATE()) >= 4 THEN YEAR(GETDATE()) ELSE YEAR(GETDATE()) - 1 END) + '-' + CONVERT(VARCHAR(4), CASE WHEN MONTH(GETDATE()) >= 4 THEN YEAR(GETDATE()) + 1 ELSE YEAR(GETDATE()) END), :trans_no, :trans_date, :invoice_no,
                 :invoice_date, :customer_code, :customer_name, :gst, :total_qty,
                 :total_item_amount, :total_cgst_amount, :total_sgst_amount, :total_igst_amount,
                 :total_amount, 0, :round_off, :net_amount, :grn, :remarks, 'ADMIN', 'ADMIN',

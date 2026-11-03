@@ -4,6 +4,7 @@ from typing import Optional
 from fastapi import (
     APIRouter,
     Depends,
+    Query,
 )
 
 from sqlalchemy.orm import Session
@@ -38,6 +39,7 @@ router = APIRouter(
 def get_quotations(
     search: Optional[str] = None,
     status: Optional[str] = None,
+    fin_year: Optional[str] = Query(default=None),
     db: Session = Depends(
         get_mssql_session("db2")
     ),
@@ -47,6 +49,7 @@ def get_quotations(
         db=db,
         search=search,
         status=status,
+        fin_year=fin_year,
     )
 
     return {

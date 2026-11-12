@@ -212,17 +212,16 @@ class TallyService:
 
     @staticmethod
     def _load_ledger_cache(db2: Session, c_code: str = "SCT", l_code: str = "UNIT I") -> Dict[str, Dict[str, str]]:
-        """Pre-loads active General Ledgers into memory for fast O(1) matching."""
-        sql = """
+        """Pre-loads active General Ledgers and Party Ledgers into memory for fast O(1) matching."""
+        cache = {}
+
+        # 1. Load General Ledgers (Sales, CGST, SGST, Banks, TDS, Expenses)
+        gl_sql = """
             SELECT AccGenLdgCode, AccGenLdgName, AccLedgerHeaderCode, AccLedgerHeaderName
             FROM dbo.Acc_Mst_GeneralLedger
-            WHERE Ccode = :c_code
-              AND Lcode = :l_code
-              AND ISNULL(Status, '') != 'Delete'
+            WHERE ISNULL(Status, '') != 'Delete'
         """
-        rows = db2.execute(text(sql), {"c_code": c_code, "l_code": l_code}).mappings().all()
-        cache = {}
-        for r in rows:
+        for r in db2.execute(text(gl_sql)).mappings().all():
             name_key = str(r["AccGenLdgName"] or "").strip().lower()
             if name_key:
                 cache[name_key] = {
@@ -231,6 +230,23 @@ class TallyService:
                     "head_code": str(r["AccLedgerHeaderCode"] or "NA"),
                     "head_name": str(r["AccLedgerHeaderName"] or "NA"),
                 }
+
+        # 2. Load Party Sub-Ledgers (Customers CUS/ and Suppliers SUP/)
+        party_sql = """
+            SELECT LedgerCode, LedgerName, AccountTypeCode, AccountType
+            FROM dbo.Acc_Mst_Ledger
+            WHERE ISNULL(Status, '') != 'Delete'
+        """
+        for r in db2.execute(text(party_sql)).mappings().all():
+            name_key = str(r["LedgerName"] or "").strip().lower()
+            if name_key:
+                cache[name_key] = {
+                    "code": str(r["LedgerCode"] or "NA"),
+                    "name": str(r["LedgerName"] or ""),
+                    "head_code": str(r["AccountTypeCode"] or "1-2-9-1"),
+                    "head_name": str(r["AccountType"] or "Domestic Customer"),
+                }
+
         return cache
 
     @classmethod

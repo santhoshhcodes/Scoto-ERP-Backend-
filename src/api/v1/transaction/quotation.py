@@ -14,6 +14,7 @@ from src.api.deps import get_mssql_session
 from src.schemas.transaction import (
     QuotationCreate,
     QuotationUpdate,
+    QuotationRevise,
     QuotationApprovalUpdate,
 )
 
@@ -40,6 +41,7 @@ def get_quotations(
     search: Optional[str] = None,
     status: Optional[str] = None,
     fin_year: Optional[str] = Query(default=None),
+    only_active: bool = Query(default=True),
     db: Session = Depends(
         get_mssql_session("db2")
     ),
@@ -50,12 +52,61 @@ def get_quotations(
         search=search,
         status=status,
         fin_year=fin_year,
+        only_active=only_active,
     )
 
     return {
         "success": True,
         "count": len(quotations),
         "data": quotations,
+    }
+
+
+# =========================================================
+# REVISION HISTORY & COMPARISON
+# =========================================================
+
+@router.get("/{trans_no:path}/revisions")
+@router.get("/revisions/{trans_no:path}")
+def get_quotation_revisions(
+    trans_no: str,
+    db: Session = Depends(
+        get_mssql_session("db2")
+    ),
+):
+    history = QuotationService.get_quotation_history(
+        db=db,
+        base_trans_no=trans_no,
+    )
+
+    return {
+        "success": True,
+        "data": history,
+    }
+
+
+# =========================================================
+# REVISE QUOTATION (Insert new row: 1R, 2R, 3R)
+# =========================================================
+
+@router.post("/{trans_no:path}/revise")
+def revise_quotation(
+    trans_no: str,
+    payload: QuotationRevise,
+    db: Session = Depends(
+        get_mssql_session("db2")
+    ),
+):
+    revised = QuotationService.revise_quotation(
+        db=db,
+        trans_no=trans_no,
+        payload=payload,
+    )
+
+    return {
+        "success": True,
+        "message": f"Quotation revised to {revised.get('TransNo')} successfully.",
+        "data": revised,
     }
 
 

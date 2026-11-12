@@ -25,6 +25,7 @@ from src.schemas.quotation import (
     QuotationCreate,
     QuotationItemBase,
     QuotationItemCreate,
+    QuotationRevise,
     QuotationUpdate,
 )
 from src.schemas.sales_invoice import (
@@ -47,6 +48,7 @@ __all__ = [
     "QuotationBase",
     "QuotationCreate",
     "QuotationUpdate",
+    "QuotationRevise",
     "QuotationApprovalUpdate",
     # Proforma
     "ProformaItemBase",

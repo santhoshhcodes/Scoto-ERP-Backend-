@@ -158,7 +158,7 @@ class AuthService:
 
         if not user_row or (
             user_row["Status"]
-            and user_row["Status"].strip().lower() != "approved"
+            and user_row["Status"].strip().lower() not in {"approved", "active"}
         ):
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,

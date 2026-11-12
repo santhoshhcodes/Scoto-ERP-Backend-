@@ -36,7 +36,17 @@ class QuotationBase(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
     TransNo: Optional[str] = None
+    BaseTransNo: Optional[str] = None
+    RevNo: Optional[int] = 0
+    RevLabel: Optional[str] = "ORIGINAL"
+    IsActiveRevision: Optional[bool] = True
+    IsLocked: Optional[bool] = False
+    RevReason: Optional[str] = None
+    ParentTransNo: Optional[str] = None
+    SupersededOn: Optional[str] = None
     TransDate: Optional[str] = None
+    FinYearVal: Optional[str] = None
+    FinYearCode: Optional[str] = None
     ProdType: Optional[str] = "1"
     ProductName: Optional[str] = None
     CustomerCode: Optional[str] = None
@@ -62,6 +72,11 @@ class QuotationCreate(QuotationBase):
 
 
 class QuotationUpdate(QuotationBase):
+    Items: List[QuotationItemCreate] = Field(default_factory=list)
+
+
+class QuotationRevise(QuotationBase):
+    RevReason: str = Field(..., description="Mandatory business reason for this revision")
     Items: List[QuotationItemCreate] = Field(default_factory=list)
 
 

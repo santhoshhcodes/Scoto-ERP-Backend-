@@ -31,6 +31,7 @@ class TravelExpenseClaimCreate(BaseModel):
     employee_code: str
     travel_start_date: date
     travel_end_date: date
+    client_code: str | None = None
     client_name: str | None = None
     destination: str
     purpose: str

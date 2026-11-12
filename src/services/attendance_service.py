@@ -245,7 +245,7 @@ class AttendanceService:
         review_rows = db2.execute(
             text("""
                 SELECT EmployeeCode, AttendanceDate, ReviewStatus, ReviewCategory, ReviewReason,
-                       CorrectedCheckIn, CorrectedCheckOut
+                       CorrectedCheckIn, CorrectedCheckOut, ClientCode, ClientName, PlaceOfVisit
                 FROM dbo.Attendance_Daily_Review
                 WHERE AttendanceDate >= :start_date AND AttendanceDate <= :end_date
             """),
@@ -562,7 +562,13 @@ class AttendanceService:
                 elif status_str == "On Duty":
                     remarks_parts.append("On Duty")
                 elif status_str in ("Onsite", "On-Site", "Onfield"):
-                    remarks_parts.append("On-Site Duty")
+                    on_site_remark = "On-Site Duty"
+                    if rev and rev.get("ClientName"):
+                        on_site_remark += f" ({rev.get('ClientName')}"
+                        if rev.get("PlaceOfVisit"):
+                            on_site_remark += f" • {rev.get('PlaceOfVisit')}"
+                        on_site_remark += ")"
+                    remarks_parts.append(on_site_remark)
                 elif status_str == "Leave":
                     remarks_parts.append("Approved Leave")
 
@@ -636,6 +642,8 @@ class AttendanceService:
                         remarks=remarks_str,
                         is_holiday=bool(cur_date in holidays_by_date),
                         holiday_name=holidays_by_date.get(cur_date, {}).get("HolidayName") if cur_date in holidays_by_date else None,
+                        client_name=rev.get("ClientName") if rev else None,
+                        place_of_visit=rev.get("PlaceOfVisit") if rev else None,
                     )
                 )
 
@@ -762,7 +770,7 @@ class AttendanceService:
         review_rows = db2.execute(
             text("""
                 SELECT EmployeeCode, ReviewStatus, ReviewReason,
-                       CorrectedCheckIn, CorrectedCheckOut
+                       CorrectedCheckIn, CorrectedCheckOut, ClientCode, ClientName, PlaceOfVisit
                 FROM dbo.Attendance_Daily_Review
                 WHERE AttendanceDate = :target_date
             """),
@@ -998,10 +1006,13 @@ class AttendanceService:
                     late_minutes=late_minutes,
                     review_status=review["ReviewStatus"] if review else None,
                     review_reason=review["ReviewReason"] if review else None,
+                    client_code=review.get("ClientCode") if review else None,
+                    client_name=review.get("ClientName") if review else None,
+                    place_of_visit=review.get("PlaceOfVisit") if review else None,
                     fine_amount=fine_amount,
                     fine_status=fine_status,
-                    is_on_site=is_on_site_emp,
-                    is_on_field=is_on_site_emp,
+                    is_on_site=bool(is_on_site_emp or (review and review.get("ReviewStatus") in ("ON_SITE", "ON_FIELD"))),
+                    is_on_field=bool(is_on_site_emp or (review and review.get("ReviewStatus") in ("ON_SITE", "ON_FIELD"))),
                     scheduled_checkout=shift_end,
                     early_exit_minutes=early_exit_minutes,
                     early_permission_minutes=early_permission_minutes,

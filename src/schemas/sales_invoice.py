@@ -47,6 +47,8 @@ class SalesInvoiceBase(BaseModel):
 
     TransNo: Optional[str] = None
     TransDate: Optional[str] = None
+    FinYearVal: Optional[str] = None
+    FinYearCode: Optional[str] = None
     InvoiceNo: Optional[str] = None
     InvoiceDate: Optional[str] = None
     CustomerCode: Optional[str] = None

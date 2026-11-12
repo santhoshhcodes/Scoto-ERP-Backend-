@@ -66,8 +66,22 @@ def _approval_code(value: Optional[str]) -> str:
     return "1" if (value or "").strip().lower() in {"approved", "1"} else "0"
 
 
+def _get_fin_year_val(payload) -> str:
+    fin_year_val = (getattr(payload, "FinYearVal", None) or "").replace("_", "-").strip()
+    if not fin_year_val and getattr(payload, "TransDate", None):
+        try:
+            from datetime import datetime
+            dt = datetime.strptime(str(payload.TransDate)[:10], "%Y-%m-%d")
+            start_yr = dt.year if dt.month >= 4 else dt.year - 1
+            fin_year_val = f"{start_yr}-{start_yr + 1}"
+        except Exception:
+            pass
+    return fin_year_val or "2026-2027"
+
+
 def _header_values(payload, trans_no: str) -> dict:
     return {
+        "fin_year_val": _get_fin_year_val(payload),
         "trans_no": trans_no,
         "trans_date": _date(payload.TransDate),
         "invoice_no": payload.InvoiceNo or "",
@@ -98,7 +112,7 @@ def _insert_items(db: Session, trans_no: str, payload) -> None:
             GST, CGST, SGST, IGST, NetAmount, Status, UserName, Usercode,
             SysName, SysIp, CreateOn
         ) VALUES (
-            'SCT', 'UNIT I', '01', CONVERT(VARCHAR(4), CASE WHEN MONTH(GETDATE()) >= 4 THEN YEAR(GETDATE()) ELSE YEAR(GETDATE()) - 1 END) + '-' + CONVERT(VARCHAR(4), CASE WHEN MONTH(GETDATE()) >= 4 THEN YEAR(GETDATE()) + 1 ELSE YEAR(GETDATE()) END), :trans_no, :trans_date,
+            'SCT', 'UNIT I', '01', :fin_year_val, :trans_no, :trans_date,
             :invoice_no, :invoice_date, :customer_code, :customer_name,
             :item_code, :product_type, :hsn_code, :qty, :rate, :item_value, :serial_no,
             :gst, :cgst, :sgst, :igst, :net_amount, 'Add', 'ADMIN', 'ADMIN',
@@ -106,6 +120,7 @@ def _insert_items(db: Session, trans_no: str, payload) -> None:
         )
     """)
     common = {
+        "fin_year_val": _get_fin_year_val(payload),
         "trans_no": trans_no, "trans_date": _date(payload.TransDate),
         "invoice_no": payload.InvoiceNo or "", "invoice_date": _date(payload.InvoiceDate),
         "customer_code": payload.CustomerCode or "", "customer_name": payload.CustomerName or "",
@@ -129,13 +144,15 @@ def _insert_serials(db: Session, trans_no: str, payload) -> None:
             MaterialInventory, SerialNo, TransNo, TransDate, Status,
             UserName, UserCode, SysIp, SysName, CreateOn
         ) VALUES (
-            'SCT', 'UNIT I', '01', CONVERT(VARCHAR(4), CASE WHEN MONTH(GETDATE()) >= 4 THEN YEAR(GETDATE()) ELSE YEAR(GETDATE()) - 1 END) + '-' + CONVERT(VARCHAR(4), CASE WHEN MONTH(GETDATE()) >= 4 THEN YEAR(GETDATE()) + 1 ELSE YEAR(GETDATE()) END), :product_type, :hsn_code,
+            'SCT', 'UNIT I', '01', :fin_year_val, :product_type, :hsn_code,
             :material_inv, :serial_no, :trans_no, :trans_date, 'Add',
             'ADMIN', 'ADMIN', '127.0.0.1', 'API_SERVER', CONVERT(VARCHAR(30), GETDATE(), 120)
         )
     """)
+    fin_year_val = _get_fin_year_val(payload)
     for serial in payload.Serials:
         db.execute(sql, {
+            "fin_year_val": fin_year_val,
             "product_type": serial.ProductType or "", "hsn_code": serial.HSNCode or "",
             "material_inv": serial.MaterialInventory or "", "serial_no": serial.SerialNo or "",
             "trans_no": trans_no, "trans_date": _date(payload.TransDate),
@@ -303,7 +320,7 @@ def create_sales_invoice(db: Session, payload):
                 RoundOff, NetAmount, GRN, Remarks, UserName, UserCode, SysIp, SysName,
                 CreateOn, Approval_Status, Status
             ) VALUES (
-                'SCT', 'UNIT I', '01', CONVERT(VARCHAR(4), CASE WHEN MONTH(GETDATE()) >= 4 THEN YEAR(GETDATE()) ELSE YEAR(GETDATE()) - 1 END) + '-' + CONVERT(VARCHAR(4), CASE WHEN MONTH(GETDATE()) >= 4 THEN YEAR(GETDATE()) + 1 ELSE YEAR(GETDATE()) END), :trans_no, :trans_date, :invoice_no,
+                'SCT', 'UNIT I', '01', :fin_year_val, :trans_no, :trans_date, :invoice_no,
                 :invoice_date, :customer_code, :customer_name, :gst, :total_qty,
                 :total_item_amount, :total_cgst_amount, :total_sgst_amount, :total_igst_amount,
                 :total_amount, 0, :round_off, :net_amount, :grn, :remarks, 'ADMIN', 'ADMIN',

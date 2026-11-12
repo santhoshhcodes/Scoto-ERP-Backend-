@@ -5,7 +5,7 @@ GO
 IF NOT EXISTS (SELECT 1 FROM dbo.MstCompany WHERE Ccode = 'SCT')
 BEGIN
     INSERT INTO dbo.MstCompany (Ccode, CompanyName, City, State, Country, Status)
-    VALUES ('SCT', 'Scoto Systec Private Limited', 'Bengaluru', 'Karnataka', 'India', 'Active');
+    VALUES ('SCT', 'Scoto Systec Private Limited', 'Coimabatore', 'Karnataka', 'India', 'Active');
 END
 GO
 
@@ -48,7 +48,7 @@ BEGIN
     VALUES ('SCT', 'UNIT I', 'ADMIN', 'admin@123');
 
     INSERT INTO dbo.UserDetails (UserID, UserName, Ccode, Lcode, Password, UserType, Status, isActive)
-    VALUES ('ADMIN', 'System Administrator', 'SCT', 'UNIT I', 'admin@123', 'SuperAdmin', 'Active', '1');
+    VALUES ('ADMIN', 'System Administrator', 'SCT', 'UNIT I', 'admin@123', 'SuperAdmin', 'Approved', '1');
 END
 GO
 

@@ -1,12 +1,11 @@
-from datetime import date
+from datetime import date, timedelta
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 
 from fastapi import HTTPException
-from sqlalchemy import text
+from sqlalchemy import text, bindparam
 from sqlalchemy.orm import Session
 
 from src.schemas.travel_expense import TravelExpenseClaimCreate, TravelExpenseStatusUpdate
-from src.services.office_expense_service import OfficeExpenseService
 from src.services.office_expense_service import OfficeExpenseService
 
 
@@ -134,6 +133,7 @@ class TravelExpenseService:
                         EmployeeCode,
                         TravelStartDate,
                         TravelEndDate,
+                        ClientCode,
                         ClientName,
                         Destination,
                         Purpose,
@@ -149,6 +149,7 @@ class TravelExpenseService:
                         :employee_code,
                         :travel_start_date,
                         :travel_end_date,
+                        :client_code,
                         :client_name,
                         :destination,
                         :purpose,
@@ -163,6 +164,7 @@ class TravelExpenseService:
                     "employee_code": data.employee_code,
                     "travel_start_date": data.travel_start_date,
                     "travel_end_date": data.travel_end_date,
+                    "client_code": data.client_code,
                     "client_name": data.client_name,
                     "destination": data.destination,
                     "purpose": data.purpose,
@@ -295,6 +297,153 @@ class TravelExpenseService:
             raise
 
     @staticmethod
+    def _audit_claims(db: Session, claims: list[dict]) -> list[dict]:
+        if not claims:
+            return claims
+
+        emp_codes = {str(c["employee_code"]) for c in claims if c.get("employee_code")}
+        dates_start = [c["travel_start_date"] for c in claims if c.get("travel_start_date")]
+        dates_end = [c["travel_end_date"] for c in claims if c.get("travel_end_date")]
+
+        if not emp_codes or not dates_start or not dates_end:
+            for c in claims:
+                c["attendance_audit"] = {
+                    "status": "UNVERIFIED",
+                    "badge_text": "No Audit",
+                    "badge_color": "slate",
+                    "verified_days": 0,
+                    "working_days": 0,
+                    "total_days": 0,
+                    "verified_dates": [],
+                    "missing_dates": [],
+                    "client_match": None,
+                    "message": "Missing date range or employee code.",
+                }
+            return claims
+
+        min_date = min(dates_start)
+        max_date = max(dates_end)
+
+        stmt = text("""
+            SELECT
+                r.EmployeeCode,
+                r.AttendanceDate,
+                r.ReviewStatus,
+                r.ClientCode,
+                r.ClientName,
+                r.PlaceOfVisit
+            FROM dbo.Attendance_Daily_Review r
+            WHERE r.EmployeeCode IN :emp_list
+              AND r.AttendanceDate >= :min_date
+              AND r.AttendanceDate <= :max_date
+              AND r.ReviewStatus IN ('ON_SITE', 'ON_FIELD', 'ON_DUTY')
+        """).bindparams(bindparam("emp_list", expanding=True))
+
+        review_rows = db.execute(
+            stmt,
+            {
+                "emp_list": list(emp_codes),
+                "min_date": min_date,
+                "max_date": max_date,
+            },
+        ).mappings().all()
+
+        # Map by (EmployeeCode, AttendanceDate)
+        review_map = {}
+        for r in review_rows:
+            key = (str(r["EmployeeCode"]), r["AttendanceDate"])
+            review_map[key] = dict(r)
+
+        for c in claims:
+            emp = str(c.get("employee_code") or "")
+            s_date = c.get("travel_start_date")
+            e_date = c.get("travel_end_date")
+            claim_client_code = c.get("client_code")
+            claim_client_name = (c.get("client_name") or "").strip().lower()
+
+            if not emp or not s_date or not e_date or e_date < s_date:
+                c["attendance_audit"] = {
+                    "status": "UNVERIFIED",
+                    "badge_text": "Invalid Range",
+                    "badge_color": "slate",
+                    "verified_days": 0,
+                    "working_days": 0,
+                    "total_days": 0,
+                    "verified_dates": [],
+                    "missing_dates": [],
+                    "client_match": None,
+                    "message": "Invalid travel start or end date.",
+                }
+                continue
+
+            curr = s_date
+            all_dates = []
+            working_dates = []
+            while curr <= e_date:
+                all_dates.append(curr)
+                if curr.weekday() != 6:  # Skip Sundays
+                    working_dates.append(curr)
+                curr += timedelta(days=1)
+
+            if not working_dates and all_dates:
+                working_dates = all_dates
+
+            total_days = len(all_dates)
+            working_days_count = len(working_dates)
+
+            verified_dates = []
+            missing_dates = []
+            matched_clients = 0
+
+            for d in working_dates:
+                rev = review_map.get((emp, d))
+                if rev:
+                    verified_dates.append(d.isoformat())
+                    rev_cc = rev.get("ClientCode")
+                    rev_cn = (rev.get("ClientName") or "").strip().lower()
+                    if claim_client_code and rev_cc and claim_client_code == rev_cc:
+                        matched_clients += 1
+                    elif claim_client_name and rev_cn and (claim_client_name in rev_cn or rev_cn in claim_client_name):
+                        matched_clients += 1
+                else:
+                    missing_dates.append(d.isoformat())
+
+            verified_count = len(verified_dates)
+            has_client_spec = bool(claim_client_code or claim_client_name)
+            client_match = (matched_clients > 0) if has_client_spec else None
+
+            if verified_count == working_days_count and working_days_count > 0:
+                audit_status = "VERIFIED"
+                badge_text = "On-Site Verified"
+                badge_color = "emerald"
+                message = f"All {working_days_count} deployment day(s) confirmed on-site in attendance."
+            elif verified_count > 0:
+                audit_status = "PARTIAL"
+                badge_text = f"Partial ({verified_count}/{working_days_count}d)"
+                badge_color = "amber"
+                message = f"{verified_count} of {working_days_count} day(s) confirmed on-site. Missing {len(missing_dates)} date(s)."
+            else:
+                audit_status = "UNVERIFIED"
+                badge_text = "No On-Site Record"
+                badge_color = "rose"
+                message = f"No On-Site attendance regularized for the {working_days_count} claimed date(s)."
+
+            c["attendance_audit"] = {
+                "status": audit_status,
+                "badge_text": badge_text,
+                "badge_color": badge_color,
+                "verified_days": verified_count,
+                "working_days": working_days_count,
+                "total_days": total_days,
+                "verified_dates": verified_dates,
+                "missing_dates": missing_dates,
+                "client_match": client_match,
+                "message": message,
+            }
+
+        return claims
+
+    @staticmethod
     def list_claims(
         db: Session,
         employee_code: str | None = None,
@@ -329,6 +478,7 @@ class TravelExpenseService:
                     e.DesignationName AS designation_name,
                     c.TravelStartDate AS travel_start_date,
                     c.TravelEndDate AS travel_end_date,
+                    c.ClientCode AS client_code,
                     c.ClientName AS client_name,
                     c.Destination AS destination,
                     c.Purpose AS purpose,
@@ -365,6 +515,7 @@ class TravelExpenseService:
                     e.DesignationName,
                     c.TravelStartDate,
                     c.TravelEndDate,
+                    c.ClientCode,
                     c.ClientName,
                     c.Destination,
                     c.Purpose,
@@ -385,7 +536,8 @@ class TravelExpenseService:
             },
         ).mappings().all()
 
-        return [dict(row) for row in rows]
+        claims = [dict(row) for row in rows]
+        return TravelExpenseService._audit_claims(db, claims)
 
     @staticmethod
     def get_claim(db: Session, claim_id: int):
@@ -402,6 +554,7 @@ class TravelExpenseService:
                     e.DesignationName AS designation_name,
                     c.TravelStartDate AS travel_start_date,
                     c.TravelEndDate AS travel_end_date,
+                    c.ClientCode AS client_code,
                     c.ClientName AS client_name,
                     c.Destination AS destination,
                     c.Purpose AS purpose,
@@ -452,6 +605,53 @@ class TravelExpenseService:
                 Decimal("0.00"),
             )
         )
+
+        TravelExpenseService._audit_claims(db, [result])
+        audit = result.get("attendance_audit")
+        if audit:
+            s_date = result.get("travel_start_date")
+            e_date = result.get("travel_end_date")
+            emp = result.get("employee_code")
+            daily_breakdown = []
+            if s_date and e_date and emp:
+                reviews = db.execute(
+                    text("""
+                        SELECT
+                            AttendanceDate,
+                            ReviewStatus,
+                            ReviewReason,
+                            ClientCode,
+                            ClientName,
+                            PlaceOfVisit
+                        FROM dbo.Attendance_Daily_Review
+                        WHERE EmployeeCode = :employee_code
+                          AND AttendanceDate >= :s_date
+                          AND AttendanceDate <= :e_date
+                    """),
+                    {
+                        "employee_code": emp,
+                        "s_date": s_date,
+                        "e_date": e_date,
+                    },
+                ).mappings().all()
+                day_rev_map = {r["AttendanceDate"]: dict(r) for r in reviews}
+
+                curr = s_date
+                while curr <= e_date:
+                    rev = day_rev_map.get(curr)
+                    daily_breakdown.append({
+                        "date": curr.isoformat(),
+                        "day_name": curr.strftime("%a"),
+                        "is_sunday": curr.weekday() == 6,
+                        "is_onsite": rev["ReviewStatus"] in ('ON_SITE', 'ON_FIELD', 'ON_DUTY') if rev else False,
+                        "review_status": rev["ReviewStatus"] if rev else None,
+                        "review_reason": rev.get("ReviewReason") if rev else None,
+                        "client_code": rev.get("ClientCode") if rev else None,
+                        "client_name": rev.get("ClientName") if rev else None,
+                        "place_of_visit": rev.get("PlaceOfVisit") if rev else None,
+                    })
+                    curr += timedelta(days=1)
+            audit["daily_breakdown"] = daily_breakdown
 
         return result
 

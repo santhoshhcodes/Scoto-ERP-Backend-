@@ -290,37 +290,50 @@ class DeviceService:
             since_str,
         )
 
-        # 3. Execute the existing PowerShell downloader.
-        cmd = [
-            "powershell.exe",
-            "-ExecutionPolicy", "Bypass",
-            "-File", DOWNLOADER_SCRIPT,
-            "-IpAddress", ip_address,
-            "-Port", "4370",
-            "-CommKey", comm_key,
-            "-SinceDate", since_str,
-        ]
+        # 3. Execute the PowerShell downloader.
+        # eSSL zkemkeeper.dll can be registered in 32-bit (SysWOW64) or 64-bit subsystem.
+        # We try 64-bit first, and automatically fall back to 32-bit SysWOW64 PowerShell if COM registration is 32-bit.
+        ps_candidates = ["powershell.exe"]
+        syswow64_ps = r"C:\Windows\SysWOW64\WindowsPowerShell\v1.0\powershell.exe"
+        if os.path.exists(syswow64_ps):
+            ps_candidates.append(syswow64_ps)
 
-        try:
-            res = subprocess.run(
-                cmd,
-                capture_output=True,
-                text=True,
-                timeout=45,
-            )
-        except subprocess.TimeoutExpired as exc:
-            raise HTTPException(
-                status_code=status.HTTP_504_GATEWAY_TIMEOUT,
-                detail=(
-                    f"Connection to biometric device at {ip_address} "
-                    "timed out after 45 seconds."
-                ),
-            ) from exc
-        except Exception as exc:
-            raise HTTPException(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail=f"Failed to execute downloader script: {exc}",
-            ) from exc
+        res = None
+        for ps_exe in ps_candidates:
+            cmd = [
+                ps_exe,
+                "-ExecutionPolicy", "Bypass",
+                "-File", DOWNLOADER_SCRIPT,
+                "-IpAddress", ip_address,
+                "-Port", "4370",
+                "-CommKey", comm_key,
+                "-SinceDate", since_str,
+            ]
+
+            try:
+                res = subprocess.run(
+                    cmd,
+                    capture_output=True,
+                    text=True,
+                    timeout=45,
+                )
+            except subprocess.TimeoutExpired as exc:
+                raise HTTPException(
+                    status_code=status.HTTP_504_GATEWAY_TIMEOUT,
+                    detail=(
+                        f"Connection to biometric device at {ip_address} "
+                        "timed out after 45 seconds."
+                    ),
+                ) from exc
+            except Exception as exc:
+                raise HTTPException(
+                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                    detail=f"Failed to execute downloader script: {exc}",
+                ) from exc
+
+            # If succeeded or didn't fail specifically with COM creation error, break
+            if "Failed to create zkemkeeper COM object" not in res.stdout:
+                break
 
         stdout_clean = res.stdout.strip()
 

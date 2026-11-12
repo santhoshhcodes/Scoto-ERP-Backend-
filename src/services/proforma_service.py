@@ -287,6 +287,7 @@ class ProformaInvoiceService:
         db: Session,
         payload: Any,
         trans_no: str,
+        fin_year_val: str = "2026-2027",
     ) -> None:
         sql = text("""
             INSERT INTO Acc_Proforma_Inv_Sub (
@@ -298,7 +299,7 @@ class ProformaInvoiceService:
                 SysIp, SysName, CreateOn
             )
             VALUES (
-                '01', '01', '01', '2026-2027',
+                '01', '01', '01', :fin_year_val,
                 :trans_no, :trans_date, :quo_no, :quo_date,
                 :cust_code, :cust_name, :item_code, :prod_type,
                 :hsn, :qty, :rate, :item_val, :gst, :cgst, :sgst,
@@ -309,6 +310,7 @@ class ProformaInvoiceService:
 
         for index, item in enumerate(payload.Items or [], start=1):
             db.execute(sql, {
+                "fin_year_val": fin_year_val,
                 "trans_no": trans_no,
                 "trans_date": payload.TransDate,
                 "quo_no": payload.QuotationNo or "",
@@ -357,6 +359,18 @@ class ProformaInvoiceService:
                     detail=f"Proforma Invoice {trans_no} already exists.",
                 )
 
+            fin_year_val = (payload.FinYearVal or "").replace("_", "-").strip() if getattr(payload, "FinYearVal", None) else ""
+            if not fin_year_val and payload.TransDate:
+                try:
+                    from datetime import datetime
+                    dt = datetime.strptime(str(payload.TransDate)[:10], "%Y-%m-%d")
+                    start_yr = dt.year if dt.month >= 4 else dt.year - 1
+                    fin_year_val = f"{start_yr}-{start_yr + 1}"
+                except Exception:
+                    pass
+            if not fin_year_val:
+                fin_year_val = "2026-2027"
+
             db.execute(
                 text("""
                     INSERT INTO Acc_Proforma_Inv_Main (
@@ -369,7 +383,7 @@ class ProformaInvoiceService:
                         UserName, UserCode, SysIp, SysName, CreateOn
                     )
                     VALUES (
-                        '01', '01', '2026-2027', '01',
+                        '01', '01', :fin_year_val, '01',
                         :trans_no, :trans_date, :quo_no, :quo_date,
                         :cust_code, :cust_name, :tot_qty,
                         :tot_item_amt, :tot_cgst, :tot_sgst,
@@ -380,6 +394,7 @@ class ProformaInvoiceService:
                     )
                 """),
                 {
+                    "fin_year_val": fin_year_val,
                     "trans_no": trans_no,
                     "trans_date": payload.TransDate,
                     "quo_no": payload.QuotationNo or "",
@@ -402,7 +417,7 @@ class ProformaInvoiceService:
                 },
             )
 
-            cls._insert_items(db, payload, trans_no)
+            cls._insert_items(db, payload, trans_no, fin_year_val)
             db.commit()
             return trans_no
 
@@ -480,7 +495,7 @@ class ProformaInvoiceService:
                 {"trans_no": trans_no},
             )
 
-            cls._insert_items(db, payload, trans_no)
+            cls._insert_items(db, payload, trans_no, fin_year_val)
             db.commit()
 
         except Exception:

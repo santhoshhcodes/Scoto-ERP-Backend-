@@ -13,6 +13,8 @@ def _sync_opening_balance_transaction(
     ledger_name: str,
     opening_balance: float | Decimal | str | None,
     balance_type: str | None,
+    acc_head_code: str = "",
+    acc_head_name: str = "",
 ):
     """
     Syncs the opening balance entry into dbo.Acc_Trans_All
@@ -46,6 +48,8 @@ def _sync_opening_balance_transaction(
                     UPDATE dbo.Acc_Trans_All
                     SET
                         LedgerName = :name,
+                        AccHeadCode = COALESCE(NULLIF(:head_code, ''), AccHeadCode),
+                        AccHeadName = COALESCE(NULLIF(:head_name, ''), AccHeadName),
                         CreditAmount = :cr,
                         DebitAmount = :dr,
                         Status = 'Active'
@@ -54,6 +58,8 @@ def _sync_opening_balance_transaction(
                 {
                     "trans_no": existing_trans[0],
                     "name": ledger_name,
+                    "head_code": acc_head_code,
+                    "head_name": acc_head_name,
                     "cr": cr_amt,
                     "dr": dr_amt,
                 },
@@ -84,7 +90,7 @@ def _sync_opening_balance_transaction(
                 VALUES (
                     'SCT', 'UNIT I', '01', CONVERT(VARCHAR(4), CASE WHEN MONTH(GETDATE()) >= 4 THEN YEAR(GETDATE()) ELSE YEAR(GETDATE()) - 1 END) + '_' + CONVERT(VARCHAR(4), CASE WHEN MONTH(GETDATE()) >= 4 THEN YEAR(GETDATE()) + 1 ELSE YEAR(GETDATE()) END),
                     :trans_no, CONVERT(VARCHAR(10), GETDATE(), 103),
-                    :code, :name, '', '', 'Opening Balance',
+                    :code, :name, :head_code, :head_name, 'Opening Balance',
                     :cr, :dr, 'Add', 'ADMIN', 'Super Admin',
                     CONVERT(VARCHAR(30), GETDATE(), 100)
                 )
@@ -93,6 +99,8 @@ def _sync_opening_balance_transaction(
                 "trans_no": trans_no,
                 "code": ledger_code,
                 "name": ledger_name,
+                "head_code": acc_head_code or "",
+                "head_name": acc_head_name or "",
                 "cr": cr_amt,
                 "dr": dr_amt,
             },
@@ -312,13 +320,13 @@ def create_ledger(db: Session, payload: LedgerCreate):
                     OpeningBalance, BalanceType
                 )
                 VALUES (
-                    '01', '01',
+                    'SCT', 'UNIT I',
                     'CAT-01', 'General',
                     'GRP-01', :acc_grp,
                     '', :acc_sub_grp,
                     'HDR-01', :acc_header,
                     :ledger_code, :ledger_name,
-                    :cost_center, 'Add',
+                    :cost_center, :status,
                     '127.0.0.1', 'API_SERVER',
                     'ADMIN', 'Super Admin', GETDATE(),
                     :opening_bal, :balance_type
@@ -334,12 +342,24 @@ def create_ledger(db: Session, payload: LedgerCreate):
                     "ledger_code": ledger_code,
                     "ledger_name": ledger_name,
                     "cost_center": payload.CostCenter or "Cost Centre",
+                    "status": payload.Status or "Add",
                     "opening_bal": opening_bal,
                     "balance_type": balance_type,
                 },
             )
+            head_code = "HDR-01"
+            head_name = payload.AccLedgerHeaderName or "General Ledger"
 
         else:
+            is_customer = (payload.LedgerType or "").strip().lower() == "customer"
+            grp_id = "Customer" if is_customer else "Supplier"
+            grp_name = "Customer" if is_customer else "Supplier"
+            category = "Sundry Debtors" if is_customer else "Sundry Creditors"
+            acc_type_code = "1-2-9-1" if is_customer else "2-2-2-2"
+            acc_type_name = "Domestic Customer" if is_customer else "Domestic Suppliers"
+            supply_for = "Customer" if is_customer else (getattr(payload, "SupplyFor", None) or "Goods")
+            ledger_type = "Customer" if is_customer else "Supplier"
+
             insert_sql = """
                 INSERT INTO dbo.Acc_Mst_Ledger (
                     Ccode, Lcode, LedgerCode,
@@ -361,9 +381,9 @@ def create_ledger(db: Session, payload: LedgerCreate):
                     OpeningBalance, BalanceType
                 )
                 VALUES (
-                    '01', '01', :ledger_code,
-                    'GRP-01', :acc_grp, 'Sundry Creditors',
-                    :region, 'Goods', :ledger_name, :cheque_print_name,
+                    'SCT', 'UNIT I', :ledger_code,
+                    :grp_id, :grp_name, :category,
+                    :region, :supply_for, :ledger_name, :cheque_print_name,
                     :ledger_class, :house_no, :add1, :add2, :area, :city,
                     :pincode, :state, :country, :mobile_no, :tel_no,
                     :contect_name, :contect_no, :mail_id, :website,
@@ -372,7 +392,7 @@ def create_ledger(db: Session, payload: LedgerCreate):
                     :gst_no, :cin_no, :pan_no, :tan_no, :ie_code, :lei_code,
                     :msme_status, :msme_no, :payment_days, 'Days',
                     'No', '0', '', 'Standard', '', '', '', '',
-                    'HDR-01', :acc_header, 'No', 'No', 'None',
+                    :acc_type_code, :acc_type_name, 'No', 'No', 'None',
                     'Add', '1', '0', '127.0.0.1', 'API_SERVER',
                     'ADMIN', 'Super Admin', GETDATE(), :ledger_type,
                     :opening_bal, :balance_type
@@ -383,7 +403,12 @@ def create_ledger(db: Session, payload: LedgerCreate):
                 text(insert_sql),
                 {
                     "ledger_code": ledger_code,
-                    "acc_grp": payload.AccGroupName or "Sundry Creditors",
+                    "grp_id": grp_id,
+                    "grp_name": grp_name,
+                    "category": category,
+                    "acc_type_code": acc_type_code,
+                    "acc_type_name": acc_type_name,
+                    "supply_for": supply_for,
                     "region": payload.Region or "Domestic",
                     "ledger_name": ledger_name,
                     "cheque_print_name": payload.ChequePrintName or ledger_name,
@@ -418,14 +443,13 @@ def create_ledger(db: Session, payload: LedgerCreate):
                     "msme_status": payload.MSME_Status or "2",
                     "msme_no": payload.MSME_No or "",
                     "payment_days": payload.PaymentDays or "30",
-                    "acc_header": (
-                        payload.AccLedgerHeaderName or "Liabilities"
-                    ),
-                    "ledger_type": payload.LedgerType or "Supplier",
+                    "ledger_type": ledger_type,
                     "opening_bal": opening_bal,
                     "balance_type": balance_type,
                 },
             )
+            head_code = acc_type_code
+            head_name = acc_type_name
 
         # Sync opening balance to Acc_Trans_All
         _sync_opening_balance_transaction(
@@ -434,6 +458,8 @@ def create_ledger(db: Session, payload: LedgerCreate):
             ledger_name=ledger_name,
             opening_balance=opening_bal,
             balance_type=balance_type,
+            acc_head_code=head_code,
+            acc_head_name=head_name,
         )
 
         db.commit()
@@ -601,7 +627,8 @@ def update_ledger(
                     AccSubGrpName = COALESCE(:acc_sub_grp, AccSubGrpName),
                     CostCenter = COALESCE(:cost_center, CostCenter),
                     OpeningBalance = COALESCE(:opening_bal, OpeningBalance),
-                    BalanceType = COALESCE(:balance_type, BalanceType)
+                    BalanceType = COALESCE(:balance_type, BalanceType),
+                    Status = COALESCE(:status, Status)
                 WHERE AccGenLdgCode = :ledger_code
                   AND Status <> 'Delete'
             """
@@ -617,6 +644,7 @@ def update_ledger(
                     "cost_center": payload.CostCenter,
                     "opening_bal": opening_bal,
                     "balance_type": payload.BalanceType,
+                    "status": payload.Status,
                 },
             )
 

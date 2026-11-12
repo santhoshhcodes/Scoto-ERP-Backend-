@@ -37,6 +37,8 @@ class ProformaBase(BaseModel):
 
     TransNo: Optional[str] = None
     TransDate: Optional[str] = None
+    FinYearVal: Optional[str] = None
+    FinYearCode: Optional[str] = None
     QuotationNo: Optional[str] = None
     QuotationDate: Optional[str] = None
     CustomerCode: Optional[str] = None

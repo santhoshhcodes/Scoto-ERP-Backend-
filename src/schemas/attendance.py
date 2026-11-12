@@ -52,6 +52,8 @@ class MonthlyAttendanceDayLog(BaseModel):
     remarks: str = ""
     is_holiday: bool = False
     holiday_name: Optional[str] = None
+    client_name: Optional[str] = None
+    place_of_visit: Optional[str] = None
 
 
 class MonthlyEmployeeReport(BaseModel):
@@ -122,6 +124,9 @@ class DailyAttendanceSummaryRecord(BaseModel):
     on_duty_minutes: int = 0
     is_holiday: bool = False
     holiday_name: Optional[str] = None
+    client_code: Optional[str] = None
+    client_name: Optional[str] = None
+    place_of_visit: Optional[str] = None
     is_weekly_off: bool = False
 
 
@@ -167,6 +172,11 @@ class LeaveCreate(BaseModel):
 class DailyReviewUpsert(BaseModel):
     employee_code: str = Field(min_length=1, max_length=50)
     attendance_date: date
+    start_date: Optional[date] = None
+    end_date: Optional[date] = None
+    client_name: Optional[str] = Field(default=None, max_length=250)
+    client_code: Optional[str] = Field(default=None, max_length=50)
+    place_of_visit: Optional[str] = Field(default=None, max_length=250)
     review_status: str = Field(
         pattern="^(PENDING_REVIEW|PRESENT_CONFIRMED|ABSENT_CONFIRMED|ON_DUTY|DEVICE_ISSUE|ON_LEAVE|LOP|COMP_OFF|HALF_DAY|ON_SITE|ON_FIELD)$"
     )

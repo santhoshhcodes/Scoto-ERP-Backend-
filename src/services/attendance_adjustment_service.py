@@ -448,68 +448,112 @@ class AttendanceAdjustmentService:
             )
 
         def action():
+            from datetime import timedelta
             emp_code = str(data.employee_code).strip()[:50]
             att_date = data.attendance_date
+            start_dt = getattr(data, "start_date", None) or att_date
+            end_dt = getattr(data, "end_date", None) or att_date
             rev_by = (data.reviewed_by or "Attendance In-charge").strip()[:50]
             rev_cat = (data.review_category or "")[:30]
             rev_reason = (data.review_reason or "")[:500]
 
-            # 1. Update or Insert into dbo.Attendance_Daily_Review
-            updated = db.execute(
-                text("""
-                    UPDATE dbo.Attendance_Daily_Review
-                    SET ReviewStatus = :review_status,
-                        ReviewCategory = :review_category,
-                        ReviewReason = :review_reason,
-                        CorrectedCheckIn = :corrected_check_in,
-                        CorrectedCheckOut = :corrected_check_out,
-                        ReviewedBy = :reviewed_by,
-                        ReviewedAt = SYSDATETIME(),
-                        UpdatedBy = :reviewed_by,
-                        UpdatedAt = SYSDATETIME()
-                    WHERE EmployeeCode = :employee_code
-                      AND AttendanceDate = :attendance_date
-                """),
-                {
-                    "employee_code": emp_code,
-                    "attendance_date": att_date,
-                    "review_status": data.review_status,
-                    "review_category": rev_cat,
-                    "review_reason": rev_reason,
-                    "corrected_check_in": data.corrected_check_in,
-                    "corrected_check_out": data.corrected_check_out,
-                    "reviewed_by": rev_by,
-                },
-            )
+            # Dedicated client/customer & site location fields
+            client_name = (str(data.client_name).strip()[:250]) if getattr(data, "client_name", None) else None
+            client_code = (str(data.client_code).strip()[:50]) if getattr(data, "client_code", None) else None
+            place_of_visit = (str(data.place_of_visit).strip()[:250]) if getattr(data, "place_of_visit", None) else None
 
-            if updated.rowcount == 0:
-                db.execute(
+            # Retain purely the work reason - NEVER store client name/code in ReviewReason
+            if not rev_reason and data.review_status in ("ON_SITE", "ON_FIELD"):
+                rev_reason = "On-Site Duty"
+            elif rev_reason:
+                # Strip any legacy '| Client:' or 'Client:' suffix from the reason
+                if " | Client:" in rev_reason:
+                    rev_reason = rev_reason.split(" | Client:")[0].strip()
+                elif rev_reason.strip().startswith("Client:"):
+                    rev_reason = "On-Site Duty"
+                rev_reason = rev_reason[:500]
+            else:
+                rev_reason = None
+
+            # Determine list of dates to process
+            dates_to_process = []
+            if end_dt and end_dt > start_dt:
+                curr = start_dt
+                while curr <= end_dt:
+                    # Skip Sunday (curr.weekday() == 6) so Sunday stays as WeeklyOff
+                    if curr.weekday() != 6:
+                        dates_to_process.append(curr)
+                    curr += timedelta(days=1)
+            else:
+                dates_to_process.append(att_date)
+
+            # 1. Update or Insert each date into dbo.Attendance_Daily_Review
+            for d in dates_to_process:
+                updated = db.execute(
                     text("""
-                        INSERT INTO dbo.Attendance_Daily_Review
-                        (
-                            EmployeeCode, AttendanceDate, ReviewStatus,
-                            ReviewCategory, ReviewReason, CorrectedCheckIn,
-                            CorrectedCheckOut, ReviewedBy, ReviewedAt, CreatedBy
-                        )
-                        VALUES
-                        (
-                            :employee_code, :attendance_date, :review_status,
-                            :review_category, :review_reason, :corrected_check_in,
-                            :corrected_check_out, :reviewed_by, SYSDATETIME(),
-                            :reviewed_by
-                        )
+                        UPDATE dbo.Attendance_Daily_Review
+                        SET ReviewStatus = :review_status,
+                            ReviewCategory = :review_category,
+                            ReviewReason = :review_reason,
+                            CorrectedCheckIn = :corrected_check_in,
+                            CorrectedCheckOut = :corrected_check_out,
+                            ClientCode = :client_code,
+                            ClientName = :client_name,
+                            PlaceOfVisit = :place_of_visit,
+                            ReviewedBy = :reviewed_by,
+                            ReviewedAt = SYSDATETIME(),
+                            UpdatedBy = :reviewed_by,
+                            UpdatedAt = SYSDATETIME()
+                        WHERE EmployeeCode = :employee_code
+                          AND AttendanceDate = :attendance_date
                     """),
                     {
                         "employee_code": emp_code,
-                        "attendance_date": att_date,
+                        "attendance_date": d,
                         "review_status": data.review_status,
-                        "review_category": rev_cat,
+                        "review_category": rev_cat or ("ON_SITE" if data.review_status in ("ON_SITE", "ON_FIELD") else ""),
                         "review_reason": rev_reason,
-                        "corrected_check_in": data.corrected_check_in,
-                        "corrected_check_out": data.corrected_check_out,
+                        "corrected_check_in": data.corrected_check_in if d == att_date else None,
+                        "corrected_check_out": data.corrected_check_out if d == att_date else None,
+                        "client_code": client_code,
+                        "client_name": client_name,
+                        "place_of_visit": place_of_visit,
                         "reviewed_by": rev_by,
                     },
                 )
+
+                if updated.rowcount == 0:
+                    db.execute(
+                        text("""
+                            INSERT INTO dbo.Attendance_Daily_Review
+                            (
+                                EmployeeCode, AttendanceDate, ReviewStatus,
+                                ReviewCategory, ReviewReason, CorrectedCheckIn,
+                                CorrectedCheckOut, ClientCode, ClientName, PlaceOfVisit,
+                                ReviewedBy, ReviewedAt, CreatedBy
+                            )
+                            VALUES
+                            (
+                                :employee_code, :attendance_date, :review_status,
+                                :review_category, :review_reason, :corrected_check_in,
+                                :corrected_check_out, :client_code, :client_name, :place_of_visit,
+                                :reviewed_by, SYSDATETIME(), :reviewed_by
+                            )
+                        """),
+                        {
+                            "employee_code": emp_code,
+                            "attendance_date": d,
+                            "review_status": data.review_status,
+                            "review_category": rev_cat or ("ON_SITE" if data.review_status in ("ON_SITE", "ON_FIELD") else ""),
+                            "review_reason": rev_reason,
+                            "corrected_check_in": data.corrected_check_in if d == att_date else None,
+                            "corrected_check_out": data.corrected_check_out if d == att_date else None,
+                            "client_code": client_code,
+                            "client_name": client_name,
+                            "place_of_visit": place_of_visit,
+                            "reviewed_by": rev_by,
+                        },
+                    )
 
             # 2. Synchronize into dbo.Attendance_Leave
             valid_leave_types = {"ON_DUTY", "COMP_OFF", "EL", "CL", "SL", "LOP", "OTHER"}
@@ -711,6 +755,7 @@ class AttendanceAdjustmentService:
                 "employee_code": data.employee_code,
                 "attendance_date": data.attendance_date,
                 "review_status": data.review_status,
+                "processed_dates_count": len(dates_to_process),
             }
 
         return AttendanceAdjustmentService._commit(db, action)

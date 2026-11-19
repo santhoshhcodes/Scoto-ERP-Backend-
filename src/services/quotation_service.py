@@ -29,8 +29,8 @@ class QuotationService:
         )
         BEGIN
             CREATE TABLE Acc_Quotation_Main (
-                Ccode VARCHAR(10) DEFAULT '01',
-                Lcode VARCHAR(10) DEFAULT '01',
+                Ccode VARCHAR(10) DEFAULT 'SCT',
+                Lcode VARCHAR(10) DEFAULT 'UNIT I',
                 FinYearVal VARCHAR(20) DEFAULT '2026-2027',
                 FinYearCode VARCHAR(10) DEFAULT '01',
                 TransNo VARCHAR(50) PRIMARY KEY,
@@ -78,8 +78,8 @@ class QuotationService:
         )
         BEGIN
             CREATE TABLE Acc_Quotation_Sub (
-                Ccode VARCHAR(10) DEFAULT '01',
-                Lcode VARCHAR(10) DEFAULT '01',
+                Ccode VARCHAR(10) DEFAULT 'SCT',
+                Lcode VARCHAR(10) DEFAULT 'UNIT I',
                 FinYearCode VARCHAR(10) DEFAULT '01',
                 FinYearVal VARCHAR(20) DEFAULT '2026-2027',
                 TransNo VARCHAR(50),
@@ -552,8 +552,8 @@ class QuotationService:
                     SysName
                 )
                 VALUES (
-                    '01',
-                    '01',
+                    'SCT',
+                    'UNIT I',
                     :fin_year_val,
                     '01',
                     :trans_no,
@@ -685,8 +685,8 @@ class QuotationService:
                         SysName
                     )
                     VALUES (
-                        '01',
-                        '01',
+                        'SCT',
+                        'UNIT I',
                         '01',
                         :fin_year_val,
                         :trans_no,
@@ -929,8 +929,8 @@ class QuotationService:
                         SysName
                     )
                     VALUES (
-                        '01',
-                        '01',
+                        'SCT',
+                        'UNIT I',
                         '01',
                         :fin_year_val,
                         :trans_no,
@@ -1262,8 +1262,8 @@ class QuotationService:
                     CreateOn
                 )
                 VALUES (
-                    '01',
-                    '01',
+                    'SCT',
+                    'UNIT I',
                     :fin_year_val,
                     :fin_year_code,
                     :trans_no,
@@ -1366,8 +1366,8 @@ class QuotationService:
                         CreateOn
                     )
                     VALUES (
-                        '01',
-                        '01',
+                        'SCT',
+                        'UNIT I',
                         '01',
                         :fin_year_val,
                         :trans_no,

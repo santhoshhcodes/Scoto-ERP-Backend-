@@ -23,6 +23,8 @@ class DayStatusEnum(str, Enum):
     COMP_OFF = "COMP_OFF"
     ON_SITE = "ON_SITE"
     ON_FIELD = "ON_FIELD"
+    WFH = "WFH"
+    WORK_FROM_HOME = "WORK_FROM_HOME"
     WEEKLY_OFF = "WEEKLY_OFF"
     HOLIDAY = "HOLIDAY"
 
@@ -54,6 +56,13 @@ class MonthlyAttendanceDayLog(BaseModel):
     holiday_name: Optional[str] = None
     client_name: Optional[str] = None
     place_of_visit: Optional[str] = None
+    scheduled_checkout: Optional[str] = None
+    late_minutes: int = 0
+    early_exit_minutes: int = 0
+    permission_minutes: int = 0
+    early_permission_minutes: int = 0
+    fine_amount: Optional[Decimal] = None
+    fine_status: Optional[str] = None
 
 
 class MonthlyEmployeeReport(BaseModel):
@@ -178,7 +187,7 @@ class DailyReviewUpsert(BaseModel):
     client_code: Optional[str] = Field(default=None, max_length=50)
     place_of_visit: Optional[str] = Field(default=None, max_length=250)
     review_status: str = Field(
-        pattern="^(PENDING_REVIEW|PRESENT_CONFIRMED|ABSENT_CONFIRMED|ON_DUTY|DEVICE_ISSUE|ON_LEAVE|LOP|COMP_OFF|HALF_DAY|ON_SITE|ON_FIELD)$"
+        pattern="^(PENDING_REVIEW|PRESENT_CONFIRMED|ABSENT_CONFIRMED|ON_DUTY|DEVICE_ISSUE|ON_LEAVE|LOP|COMP_OFF|HALF_DAY|ON_SITE|ON_FIELD|WFH|WORK_FROM_HOME)$"
     )
     review_category: Optional[str] = Field(default=None, max_length=30)
     review_reason: Optional[str] = Field(default=None, max_length=500)
@@ -204,7 +213,12 @@ class LateFineUpsert(BaseModel):
     shift_start_time: Optional[time] = None
     allowed_until: Optional[time] = None
     permission_minutes_applied: Optional[int] = Field(default=None, ge=0)
-    late_minutes: int = Field(ge=0)
+    late_minutes: int = Field(default=0, ge=0)
+    actual_check_out: Optional[datetime] = None
+    shift_end_time: Optional[time] = None
+    early_exit_minutes: Optional[int] = Field(default=0, ge=0)
+    early_permission_minutes: Optional[int] = Field(default=0, ge=0)
+    fine_type: Optional[str] = Field(default="LATE_ARRIVAL", max_length=50)
     fine_amount: Optional[Decimal] = Field(default=None, ge=0)
     fine_status: str = Field(
         default="PENDING",
@@ -224,12 +238,23 @@ class MonthlyLateFineRecord(BaseModel):
     allowed_until: Optional[time] = None
     permission_minutes_applied: int = 0
     late_minutes: int = 0
+    actual_check_out: Optional[datetime] = None
+    shift_end_time: Optional[time] = None
+    early_exit_minutes: int = 0
+    early_permission_minutes: int = 0
+    fine_type: str = "LATE_ARRIVAL"
     fine_amount: Optional[Decimal] = None
     currency_code: str = "INR"
     fine_status: str = "PENDING"
     reason: Optional[str] = None
     entered_by: Optional[str] = None
     confirmed_by: Optional[str] = None
+
+
+class EmployeeShiftTimingUpdate(BaseModel):
+    employee_code: str = Field(min_length=1, max_length=50)
+    shift_start_time: Optional[time] = None
+    shift_end_time: Optional[time] = None
 
 
 class HolidayCreate(BaseModel):

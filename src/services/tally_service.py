@@ -176,27 +176,33 @@ class TallyService:
             fy_start_year = trans_date.year if trans_date.month >= 4 else trans_date.year - 1
             fy_val_default = f"{fy_start_year}_{fy_start_year + 1}"
 
+            fy_val_dash = f"{fy_start_year}-{fy_start_year + 1}"
+
             sql = """
-                SELECT TOP 1 FinYearCode, FinYear
+                SELECT TOP 1 YearCode AS FinYearCode, FinacialYear AS FinYear
                 FROM dbo.MstFinacialYear
                 WHERE Ccode = :c_code
                   AND Lcode = :l_code
-                  AND FinYear = :fy_val
+                  AND (
+                      FinacialYear = :fy_val 
+                      OR FinacialYear = :fy_dash 
+                      OR REPLACE(FinacialYear, '_', '-') = :fy_dash
+                  )
             """
             row = db2.execute(
                 text(sql),
-                {"c_code": c_code, "l_code": l_code, "fy_val": fy_val_default},
+                {"c_code": c_code, "l_code": l_code, "fy_val": fy_val_default, "fy_dash": fy_val_dash},
             ).mappings().first()
 
             if row:
                 return str(row["FinYearCode"]), str(row["FinYear"])
 
             sql_range = """
-                SELECT TOP 1 FinYearCode, FinYear
+                SELECT TOP 1 YearCode AS FinYearCode, FinacialYear AS FinYear
                 FROM dbo.MstFinacialYear
                 WHERE Ccode = :c_code
                   AND Lcode = :l_code
-                ORDER BY FinYearCode DESC
+                ORDER BY YearCode DESC
             """
             row_range = db2.execute(
                 text(sql_range),
@@ -269,6 +275,22 @@ class TallyService:
             raise HTTPException(status_code=400, detail="Excel workbook has no worksheets.")
 
         ledger_cache = cls._load_ledger_cache(db2, c_code, l_code)
+
+        # Pre-query existing vouchers to identify duplicates during preview
+        existing_vouchers_set = set()
+        try:
+            ex_rows = db2.execute(
+                text("""
+                    SELECT DISTINCT LTRIM(RTRIM(TransNo)), LTRIM(RTRIM(TransDate)), LOWER(LTRIM(RTRIM(TransType)))
+                    FROM dbo.Acc_Trans_All
+                    WHERE (Status IS NULL OR Status <> 'Delete')
+                """)
+            ).fetchall()
+            for r in ex_rows:
+                if r[0] and r[1] and r[2]:
+                    existing_vouchers_set.add((str(r[0]), str(r[1]), str(r[2])))
+        except Exception:
+            pass
 
         processed_sheets = []
         parsed_vouchers = []
@@ -407,6 +429,8 @@ class TallyService:
                 total_credits += main_cr
                 total_debits += main_dr
 
+                is_in_db = (str(vno_val).strip(), str(trans_date_str).strip(), str(vtype_val).strip().lower()) in existing_vouchers_set
+
                 parsed_vouchers.append({
                     "sheet_name": sheet_name,
                     "row_number": r_idx,
@@ -417,6 +441,7 @@ class TallyService:
                     "particulars": particulars_val,
                     "narration": narration_val,
                     "gross_total": float(main_cr if main_cr > 0 else main_dr),
+                    "is_already_in_db": is_in_db,
                     "entries": voucher_entries,
                 })
                 sheet_voucher_count += 1
@@ -427,10 +452,14 @@ class TallyService:
                     "voucher_count": sheet_voucher_count,
                 })
 
+        already_in_db_cnt = sum(1 for v in parsed_vouchers if v.get("is_already_in_db"))
+
         return {
             "summary": {
                 "total_sheets": len(processed_sheets),
                 "total_vouchers": len(parsed_vouchers),
+                "already_in_db_count": already_in_db_cnt,
+                "new_vouchers_count": len(parsed_vouchers) - already_in_db_cnt,
                 "total_entries": sum(len(v["entries"]) for v in parsed_vouchers),
                 "total_debit": float(total_debits),
                 "total_credit": float(total_credits),
@@ -452,9 +481,11 @@ class TallyService:
         l_code: str = "UNIT I",
         user_id: str = "ACCSCOTO",
         user_name: str = "ACCSCOTO",
+        overwrite: bool = False,
     ) -> Dict[str, Any]:
         """
         Executes actual DB insertion into dbo.Acc_Trans_All matching .NET Rpt_Tally_Upload.aspx.cs.
+        Includes smart deduplication to prevent duplicate entries if an Excel file is uploaded multiple times.
         """
         parsed = cls.parse_tally_workbook(file_bytes, db2, c_code, l_code)
         vouchers = parsed["vouchers"]
@@ -466,6 +497,10 @@ class TallyService:
             )
 
         inserted_count = 0
+        inserted_vouchers_count = 0
+        skipped_duplicate_vouchers = 0
+        skipped_duplicate_entries = 0
+        overwritten_vouchers_count = 0
         now_str = datetime.now().strftime("%b %d %Y %I:%M%p")
         fy_cache: Dict[str, Tuple[str, str]] = {}
 
@@ -488,6 +523,41 @@ class TallyService:
         try:
             for v in vouchers:
                 trans_date_str = v["trans_date"]
+                v_no = str(v["voucher_no"]).strip()
+                v_type = str(v["voucher_type"]).strip()
+
+                # Deduplication check: check if voucher already exists in Acc_Trans_All
+                existing_check = db2.execute(
+                    text("""
+                        SELECT TOP 1 TransNo
+                        FROM dbo.Acc_Trans_All
+                        WHERE TransNo = :vno
+                          AND TransDate = :vdate
+                          AND TransType = :vtype
+                          AND (Status IS NULL OR Status <> 'Delete')
+                    """),
+                    {"vno": v_no, "vdate": trans_date_str, "vtype": v_type},
+                ).first()
+
+                if existing_check:
+                    if overwrite:
+                        db2.execute(
+                            text("""
+                                UPDATE dbo.Acc_Trans_All
+                                SET Status = 'Delete'
+                                WHERE TransNo = :vno
+                                  AND TransDate = :vdate
+                                  AND TransType = :vtype
+                                  AND (Status IS NULL OR Status <> 'Delete')
+                            """),
+                            {"vno": v_no, "vdate": trans_date_str, "vtype": v_type},
+                        )
+                        overwritten_vouchers_count += 1
+                    else:
+                        skipped_duplicate_vouchers += 1
+                        skipped_duplicate_entries += len(v["entries"])
+                        continue
+
                 if trans_date_str not in fy_cache:
                     dt = datetime.strptime(trans_date_str, "%Y%m%d").date()
                     fy_cache[trans_date_str] = cls._get_financial_year(db2, dt, c_code, l_code)
@@ -502,13 +572,13 @@ class TallyService:
                             "lcode": l_code,
                             "fy_code": fy_code,
                             "fy_val": fy_val,
-                            "trans_no": v["voucher_no"],
+                            "trans_no": v_no,
                             "trans_date": trans_date_str,
                             "leader_code": entry["ledger_code"],
                             "ledger_name": entry["ledger_name"],
                             "acc_head_code": entry["acc_head_code"],
                             "acc_head_name": entry["acc_head_name"],
-                            "trans_type": v["voucher_type"],
+                            "trans_type": v_type,
                             "credit_amt": entry["credit_amount"],
                             "debit_amt": entry["debit_amount"],
                             "narration": v["narration"],
@@ -518,6 +588,7 @@ class TallyService:
                         },
                     )
                     inserted_count += 1
+                inserted_vouchers_count += 1
 
             db2.commit()
         except Exception as e:
@@ -527,12 +598,24 @@ class TallyService:
                 detail=f"Tally upload transaction failed during database insert: {str(e)}",
             )
 
+        if skipped_duplicate_vouchers > 0:
+            msg = (
+                f"Upload processed: {inserted_vouchers_count} vouchers inserted ({inserted_count} entries), "
+                f"{skipped_duplicate_vouchers} duplicate vouchers skipped (already present)."
+            )
+        else:
+            msg = f"Tally Excel uploaded successfully: {inserted_vouchers_count} vouchers inserted ({inserted_count} entries)."
+
         return {
             "success": True,
-            "message": "Tally Excel uploaded successfully.",
+            "message": msg,
             "sheets_processed": len(parsed["sheets"]),
             "vouchers_processed": len(vouchers),
+            "vouchers_inserted": inserted_vouchers_count,
             "entries_inserted": inserted_count,
+            "duplicate_vouchers_skipped": skipped_duplicate_vouchers,
+            "duplicate_entries_skipped": skipped_duplicate_entries,
+            "overwritten_vouchers_count": overwritten_vouchers_count,
             "total_debit": parsed["summary"]["total_debit"],
             "total_credit": parsed["summary"]["total_credit"],
             "unmatched_ledgers": parsed["unmatched_ledgers"],

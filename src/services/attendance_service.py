@@ -1,5 +1,6 @@
 import calendar
 from datetime import date, datetime, time, timedelta
+from decimal import Decimal
 from typing import List, Optional
 
 from fastapi import HTTPException
@@ -47,7 +48,8 @@ class AttendanceService:
         sql = """
             SELECT EmployeeCode, FirstName, MiddleName, LastName,
                    DisplayName, ESSLEmployeeCode, EmployeeSource,
-                   CompanyCode, LocationCode, IsActive, IsOnSite
+                   CompanyCode, LocationCode, IsActive, IsOnSite,
+                   ShiftEndTime, ShiftStartTime
             FROM dbo.Employee_Mst
             WHERE IsActive = 1
               AND (:employee_code IS NULL OR EmployeeCode = :employee_code)
@@ -271,18 +273,24 @@ class AttendanceService:
         # 5. Approved/Pending Permissions
         permission_rows = db2.execute(
             text("""
-                SELECT EmployeeCode, AttendanceDate, SUM(PermissionMinutes) AS permission_minutes
+                SELECT EmployeeCode, AttendanceDate, PermissionType, SUM(PermissionMinutes) AS permission_minutes
                 FROM dbo.Attendance_Permission
                 WHERE AttendanceDate >= :start_date AND AttendanceDate <= :end_date
                   AND (ApprovalStatus != 'REJECTED' OR ApprovalStatus IS NULL)
-                GROUP BY EmployeeCode, AttendanceDate
+                GROUP BY EmployeeCode, AttendanceDate, PermissionType
             """),
             {"start_date": start_date_obj, "end_date": end_date_obj},
         ).mappings().all()
-        emp_permissions = {
-            (str(row["EmployeeCode"]).strip(), row["AttendanceDate"]): int(row["permission_minutes"] or 0)
-            for row in permission_rows
-        }
+        emp_late_permissions = {}
+        emp_early_permissions = {}
+        for row in permission_rows:
+            e_code = str(row["EmployeeCode"]).strip()
+            e_dt = row["AttendanceDate"]
+            p_mins = int(row["permission_minutes"] or 0)
+            if row.get("PermissionType") == "EARLY_EXIT":
+                emp_early_permissions[(e_code, e_dt)] = emp_early_permissions.get((e_code, e_dt), 0) + p_mins
+            else:
+                emp_late_permissions[(e_code, e_dt)] = emp_late_permissions.get((e_code, e_dt), 0) + p_mins
 
         # 5b. Holidays from dbo.Attendance_Holiday
         holidays_by_date = {}
@@ -305,10 +313,12 @@ class AttendanceService:
         except Exception:
             pass
 
-        # 6. Late Fines (Waived, Confirmed, Pending)
+        # 6. Late & Early Fines (Waived, Confirmed, Pending)
         fine_rows = db2.execute(
             text("""
-                SELECT EmployeeCode, AttendanceDate, LateMinutes, PermissionMinutesApplied, FineAmount, FineStatus
+                SELECT EmployeeCode, AttendanceDate, LateMinutes, PermissionMinutesApplied,
+                       ActualCheckOut, ShiftEndTime, EarlyExitMinutes, EarlyPermissionMinutes, FineType,
+                       FineAmount, FineStatus
                 FROM dbo.Attendance_Late_Fine
                 WHERE AttendanceDate >= :start_date AND AttendanceDate <= :end_date
             """),
@@ -345,8 +355,12 @@ class AttendanceService:
                 )
 
             shift_start = (
-                policy["ShiftStartTime"] if (policy and policy.get("ShiftStartTime"))
-                else time(9, 30)
+                emp.get("ShiftStartTime") or
+                (policy["ShiftStartTime"] if (policy and policy.get("ShiftStartTime")) else time(9, 30))
+            )
+            shift_end = (
+                emp.get("ShiftEndTime") or
+                (policy["ShiftEndTime"] if (policy and policy.get("ShiftEndTime")) else time(19, 30))
             )
             grace_minutes = int((policy["GraceMinutes"] if (policy and policy.get("GraceMinutes") is not None) else 10) or 10)
 
@@ -381,6 +395,13 @@ class AttendanceService:
                             total_minutes=0,
                             status="-",
                             remarks="",
+                            scheduled_checkout=shift_end.strftime("%H:%M"),
+                            late_minutes=0,
+                            early_exit_minutes=0,
+                            permission_minutes=0,
+                            early_permission_minutes=0,
+                            fine_amount=None,
+                            fine_status=None,
                         )
                     )
                     continue
@@ -389,9 +410,13 @@ class AttendanceService:
                 punch = punches_by_emp_and_date.get((essl_code, cur_date)) if essl_code else None
                 fine = emp_fines.get((app_code, cur_date))
 
-                perm_minutes = emp_permissions.get((app_code, cur_date), 0)
+                perm_minutes = emp_late_permissions.get((app_code, cur_date), 0)
                 if fine and fine.get("PermissionMinutesApplied") is not None:
                     perm_minutes = max(perm_minutes, int(fine["PermissionMinutesApplied"] or 0))
+
+                early_perm_minutes = emp_early_permissions.get((app_code, cur_date), 0)
+                if fine and fine.get("EarlyPermissionMinutes") is not None:
+                    early_perm_minutes = max(early_perm_minutes, int(fine["EarlyPermissionMinutes"] or 0))
 
                 shift_start_dt = datetime.combine(cur_date, shift_start)
                 if perm_minutes > 0:
@@ -447,11 +472,14 @@ class AttendanceService:
                     late_minutes = int(fine["LateMinutes"] or 0)
                 elif first_in:
                     if perm_minutes > 0:
+                        # Morning Permission: 10m grace period DOES NOT apply. Cutoff = 09:30 + perm_minutes.
                         if first_in > allowed_dt:
                             late_minutes = max(0, int((first_in - allowed_dt).total_seconds() // 60))
                     else:
+                        # Morning Grace Period: 10-minute grace period up to 09:40 AM.
+                        # After 09:40 AM, late minutes calculated FROM 09:40 AM (e.g. 09:41 -> 1m, 09:45 -> 5m).
                         if first_in > allowed_dt:
-                            late_minutes = max(0, int((first_in - shift_start_dt).total_seconds() // 60))
+                            late_minutes = max(0, int((first_in - allowed_dt).total_seconds() // 60))
                 else:
                     late_minutes = 0
 
@@ -478,6 +506,9 @@ class AttendanceService:
                         present_days += 1
                     elif r_stat in ("ON_SITE", "ON_FIELD"):
                         status_str = "Onsite"
+                        present_days += 1
+                    elif r_stat in ("WFH", "WORK_FROM_HOME"):
+                        status_str = "WFH"
                         present_days += 1
                     elif r_stat == "ON_LEAVE":
                         if r_cat == "CASUAL_LEAVE" or "casual" in r_reason.lower():
@@ -593,17 +624,35 @@ class AttendanceService:
                 if late_minutes > 0:
                     remarks_parts.append(f"Late: {late_minutes} mins")
 
-                # 3b. Early exit check: only if out punch exists and checkout is before 18:45 (6:45 PM)
-                if last_out and last_out.time() < time(18, 45) and status_str in ("Present", "Half Day"):
-                    early_diff = int((datetime.combine(cur_date, time(18, 45)) - last_out).total_seconds() // 60)
-                    if early_diff > 0:
-                        remarks_parts.append(f"Early Exit: {early_diff}m")
+                # 3b. Early exit calculation:
+                # - Evening permission: calculate permitted departure from actual office closing (18:30 / 6:30 PM).
+                #   e.g. 30m permission -> allowed exit from 18:00 (6:00 PM). Exits before 18:00 get early exit fine.
+                # - Without evening permission: check against employee's individually assigned closing (shift_end: 19:30 or 18:45).
+                early_exit_minutes = 0
+                if fine and fine.get("EarlyExitMinutes") is not None:
+                    early_exit_minutes = int(fine["EarlyExitMinutes"] or 0)
+                elif last_out and status_str in ("Present", "Half Day", "On Duty", "Onsite"):
+                    if early_perm_minutes > 0:
+                        core_closing = datetime.combine(cur_date, time(18, 30))
+                        allowed_exit = core_closing - timedelta(minutes=early_perm_minutes)
+                    else:
+                        allowed_exit = datetime.combine(cur_date, shift_end)
 
-                # 4. Permission
+                    if last_out < allowed_exit:
+                        early_exit_minutes = max(0, int((allowed_exit - last_out).total_seconds() // 60))
+                    else:
+                        early_exit_minutes = 0
+
+                if early_exit_minutes > 0:
+                    remarks_parts.append(f"Early Exit: {early_exit_minutes}m")
+
+                # 4. Permission (Late and Early)
                 if perm_minutes > 0:
-                    remarks_parts.append(f"Permission: {perm_minutes} mins")
+                    remarks_parts.append(f"Late Perm: {perm_minutes}m")
+                if early_perm_minutes > 0:
+                    remarks_parts.append(f"Early Perm: {early_perm_minutes}m")
 
-                # 5. Fine Status (STRICTLY NO MONEY AMOUNT as requested)
+                # 5. Fine Status (STRICTLY NO MONEY AMOUNT in remarks as requested)
                 if fine:
                     f_stat = fine.get("FineStatus")
                     if f_stat == "CONFIRMED":
@@ -611,9 +660,9 @@ class AttendanceService:
                     elif f_stat == "WAIVED":
                         remarks_parts.append("Fine Waived")
                     elif f_stat == "PENDING":
-                        remarks_parts.append("Late Fine Pending")
-                elif late_minutes > 0 and status_str not in ("Absent", "WO", "LOP", "Casual Leave"):
-                    remarks_parts.append("Late Fine Pending")
+                        remarks_parts.append("Fine Pending")
+                elif (late_minutes > 0 or early_exit_minutes > 0) and status_str not in ("Absent", "WO", "LOP", "Casual Leave"):
+                    remarks_parts.append("Fine Pending")
 
                 # 6. Holiday / Weekly Off / Absent if no other remark
                 if status_str == "Holiday":
@@ -634,7 +683,7 @@ class AttendanceService:
                         day_name=day_name,
                         in_time=in_time_str,
                         out_time=out_time_str,
-                        shift="GS",
+                        shift=f"GS ({shift_end.strftime('%H:%M')})",
                         total_duration=dur_str,
                         duration_str=dur_str,
                         total_minutes=mins,
@@ -644,6 +693,13 @@ class AttendanceService:
                         holiday_name=holidays_by_date.get(cur_date, {}).get("HolidayName") if cur_date in holidays_by_date else None,
                         client_name=rev.get("ClientName") if rev else None,
                         place_of_visit=rev.get("PlaceOfVisit") if rev else None,
+                        scheduled_checkout=shift_end.strftime("%H:%M"),
+                        late_minutes=late_minutes,
+                        early_exit_minutes=early_exit_minutes,
+                        permission_minutes=perm_minutes,
+                        early_permission_minutes=early_perm_minutes,
+                        fine_amount=fine.get("FineAmount") if fine else None,
+                        fine_status=fine.get("FineStatus") if fine else None,
                     )
                 )
 
@@ -738,18 +794,23 @@ class AttendanceService:
 
         permission_rows = db2.execute(
             text("""
-                SELECT EmployeeCode, SUM(PermissionMinutes) AS permission_minutes
+                SELECT EmployeeCode, PermissionType, SUM(PermissionMinutes) AS permission_minutes
                 FROM dbo.Attendance_Permission
                 WHERE AttendanceDate = :target_date
                   AND ApprovalStatus = 'APPROVED'
-                GROUP BY EmployeeCode
+                GROUP BY EmployeeCode, PermissionType
             """),
             {"target_date": target_date},
         ).mappings().all()
-        permissions = {
-            row["EmployeeCode"]: int(row["permission_minutes"] or 0)
-            for row in permission_rows
-        }
+        late_permissions = {}
+        early_permissions = {}
+        for row in permission_rows:
+            emp = row["EmployeeCode"]
+            mins = int(row["permission_minutes"] or 0)
+            if row.get("PermissionType") == "EARLY_EXIT":
+                early_permissions[emp] = early_permissions.get(emp, 0) + mins
+            else:
+                late_permissions[emp] = late_permissions.get(emp, 0) + mins
 
         leave_rows = db2.execute(
             text("""
@@ -780,7 +841,8 @@ class AttendanceService:
 
         fine_rows = db2.execute(
             text("""
-                SELECT EmployeeCode, FineAmount, FineStatus, PermissionMinutesApplied, LateMinutes
+                SELECT EmployeeCode, FineAmount, FineStatus, PermissionMinutesApplied, LateMinutes,
+                       ActualCheckOut, ShiftEndTime, EarlyExitMinutes, EarlyPermissionMinutes, FineType
                 FROM dbo.Attendance_Late_Fine
                 WHERE AttendanceDate = :target_date
             """),
@@ -835,7 +897,7 @@ class AttendanceService:
             shift_start_dt = datetime.combine(target_date, shift_start)
             
             fine = fines.get(code)
-            permission_minutes = permissions.get(code, 0)
+            permission_minutes = late_permissions.get(code, 0)
             if fine and fine.get("PermissionMinutesApplied") is not None:
                 permission_minutes = max(permission_minutes, int(fine["PermissionMinutesApplied"] or 0))
 
@@ -885,11 +947,14 @@ class AttendanceService:
             late_minutes = 0
             if first_in:
                 if permission_minutes > 0:
+                    # Morning Permission: 10m grace period DOES NOT apply. Cutoff = 09:30 + permission_minutes.
                     if first_in > allowed_dt:
                         late_minutes = max(0, int((first_in - allowed_dt).total_seconds() // 60))
                 else:
+                    # Morning Grace Period: 10-minute grace period up to 09:40 AM.
+                    # After 09:40 AM, late minutes calculated FROM 09:40 AM (e.g. 09:41 -> 1m, 09:45 -> 5m).
                     if first_in > allowed_dt:
-                        late_minutes = max(0, int((first_in - shift_start_dt).total_seconds() // 60))
+                        late_minutes = max(0, int((first_in - allowed_dt).total_seconds() // 60))
             else:
                 # Checkout only (or missing in punch) -> NEVER count late arrival!
                 late_minutes = 0
@@ -899,36 +964,51 @@ class AttendanceService:
 
             fine_amount = fine["FineAmount"] if fine else None
             fine_status = fine["FineStatus"] if fine else None
-            if fine_status == "WAIVED" or late_minutes == 0:
-                if fine_status == "WAIVED":
-                    fine_amount = 0
+            if fine_status == "WAIVED":
+                fine_amount = Decimal("0.00")
 
             is_on_site_emp = bool(employee.get("is_on_site") if employee.get("is_on_site") is not None else employee.get("is_on_field"))
             is_sunday = (target_date.weekday() == 6)
 
-            # Scheduled Shift End time (standard 19:30 or policy ShiftEndTime)
-            shift_end = (
-                policy["ShiftEndTime"] if (policy and policy.get("ShiftEndTime"))
-                else time(19, 30)
-            )
+            # Scheduled Shift End time (standard 19:30 or individual employee assigned closing time e.g. 18:45)
+            emp_assigned_end = employee.get("ShiftEndTime")
+            if emp_assigned_end:
+                shift_end = emp_assigned_end
+            elif policy and policy.get("ShiftEndTime"):
+                shift_end = policy["ShiftEndTime"]
+            else:
+                shift_end = time(19, 30)
 
             # Early Exit Calculation:
-            # Rule: If out punch was NOT inserted -> DO NOT calculate early exit!
-            # If out punch IS inserted: checkout at or after 18:45 (6:45 PM) is ON TIME (0 early exit)!
+            # 1. Base expected exit time is employee's individually assigned closing time (e.g. 19:30 or 18:45).
+            # 2. If early permission granted, allowed_exit = shift_end - early_permission_minutes.
+            # 3. If last_out >= allowed_exit -> 0 early exit minutes (On Time / Permitted).
+            # 4. If last_out < allowed_exit -> early_exit_minutes = allowed_exit - last_out.
             early_exit_minutes = 0
-            if last_out:
-                checkout_cutoff = datetime.combine(target_date, time(18, 45))
-                if shift_end < time(18, 45):
-                    checkout_cutoff = datetime.combine(target_date, shift_end)
+            early_permission_minutes = early_permissions.get(code, 0)
+            if not early_permission_minutes and review and "EarlyPermissionMinutes" in review:
+                early_permission_minutes = int(review.get("EarlyPermissionMinutes") or 0)
+            if not early_permission_minutes and fine and fine.get("EarlyPermissionMinutes"):
+                early_permission_minutes = int(fine["EarlyPermissionMinutes"] or 0)
 
-                if last_out < checkout_cutoff:
-                    early_exit_minutes = max(0, int((checkout_cutoff - last_out).total_seconds() // 60))
+            if fine and fine.get("EarlyExitMinutes") is not None:
+                early_exit_minutes = int(fine["EarlyExitMinutes"] or 0)
+            elif last_out:
+                # Evening permission: calculate permitted departure from actual office closing (18:30 / 6:30 PM).
+                # Without evening permission: follow individually assigned shift closing (19:30 or 18:45).
+                if early_permission_minutes > 0:
+                    core_closing = datetime.combine(target_date, time(18, 30))
+                    allowed_exit = core_closing - timedelta(minutes=early_permission_minutes)
+                else:
+                    allowed_exit = datetime.combine(target_date, shift_end)
+
+                if last_out < allowed_exit:
+                    early_exit_minutes = max(0, int((allowed_exit - last_out).total_seconds() // 60))
                 else:
                     early_exit_minutes = 0
             else:
                 early_exit_minutes = 0
 
-            early_permission_minutes = int(review.get("EarlyPermissionMinutes") or 0) if review and "EarlyPermissionMinutes" in review else 0
             on_duty_minutes = int(review.get("OnDutyMinutes") or 0) if review and "OnDutyMinutes" in review else 0
             if on_duty_minutes > 0:
                 total_minutes += on_duty_minutes
@@ -985,6 +1065,15 @@ class AttendanceService:
                 status_value = "HALF_DAY"
             else:
                 status_value = "SHORT_HOURS"
+
+            # Authorized off-site, on-duty and remote modes waive late/early penalties
+            if status_value in ("ON_DUTY", "ON_SITE", "ON_FIELD", "WFH", "WORK_FROM_HOME"):
+                early_exit_minutes = 0
+                late_minutes = 0
+                fine_amount = None
+                fine_status = "WAIVED"
+                if total_minutes == 0:
+                    total_minutes = 480
 
             output.append(
                 DailyAttendanceSummaryRecord(

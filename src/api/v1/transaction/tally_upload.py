@@ -56,11 +56,12 @@ async def upload_tally_excel(
     l_code: str = Form(default="UNIT I", description="Location code"),
     user_id: str = Form(default="ACCSCOTO", description="Operating User ID"),
     user_name: str = Form(default="ACCSCOTO", description="Operating User Name"),
+    overwrite: bool = Form(default=False, description="Whether to overwrite existing duplicate vouchers"),
     db2: Session = Depends(get_mssql_session("db2")),
 ):
     """
     Ingests vouchers from Tally Excel into dbo.Acc_Trans_All.
-    Executes the exact database mapping from Rpt_Tally_Upload.aspx.cs.
+    Executes the exact database mapping with smart deduplication.
     """
     if not file.filename.lower().endswith(".xlsx"):
         raise HTTPException(
@@ -82,6 +83,7 @@ async def upload_tally_excel(
         l_code=l_code,
         user_id=user_id,
         user_name=user_name,
+        overwrite=overwrite,
     )
 
 

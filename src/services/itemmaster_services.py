@@ -99,8 +99,8 @@ def create_item(db: Session, payload: ItemCreate):
             CreatedOn
         )
         VALUES (
-            '01',
-            '01',
+            'SCT',
+            'UNIT I',
             :item_code,
             :product_type,
             :item_description,

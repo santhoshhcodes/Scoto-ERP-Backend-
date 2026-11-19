@@ -16,6 +16,7 @@ from src.schemas.attendance import (
     LeaveCreate,
     MonthlyLateFineRecord,
     PermissionCreate,
+    EmployeeShiftTimingUpdate,
 )
 
 
@@ -465,6 +466,10 @@ class AttendanceAdjustmentService:
             # Retain purely the work reason - NEVER store client name/code in ReviewReason
             if not rev_reason and data.review_status in ("ON_SITE", "ON_FIELD"):
                 rev_reason = "On-Site Duty"
+            elif not rev_reason and data.review_status == "ON_DUTY":
+                rev_reason = f"On Duty - {client_name or 'Client Visit'}"
+            elif not rev_reason and data.review_status in ("WFH", "WORK_FROM_HOME"):
+                rev_reason = "Work From Home"
             elif rev_reason:
                 # Strip any legacy '| Client:' or 'Client:' suffix from the reason
                 if " | Client:" in rev_reason:
@@ -681,7 +686,7 @@ class AttendanceAdjustmentService:
                 existing_perm = db.execute(
                     text("""
                         SELECT PermissionId FROM dbo.Attendance_Permission
-                        WHERE EmployeeCode = :c AND AttendanceDate = :d
+                        WHERE EmployeeCode = :c AND AttendanceDate = :d AND (PermissionType != 'EARLY_EXIT' OR PermissionType IS NULL)
                     """),
                     {"c": emp_code, "d": att_date},
                 ).scalar()
@@ -714,6 +719,48 @@ class AttendanceAdjustmentService:
                             )
                         """),
                         {"c": emp_code, "d": att_date, "pm": perm_mins, "r": p_reason, "by": rev_by},
+                    )
+
+            # 3b. Early departure permission synchronization
+            early_perm_mins = getattr(data, "early_permission_minutes", None) or 0
+            if early_perm_mins > 0:
+                ep_reason = (rev_reason or f"Early departure permission granted ({early_perm_mins} mins)")[:500]
+                existing_ep = db.execute(
+                    text("""
+                        SELECT PermissionId FROM dbo.Attendance_Permission
+                        WHERE EmployeeCode = :c AND AttendanceDate = :d AND PermissionType = 'EARLY_EXIT'
+                    """),
+                    {"c": emp_code, "d": att_date},
+                ).scalar()
+
+                if existing_ep:
+                    db.execute(
+                        text("""
+                            UPDATE dbo.Attendance_Permission
+                            SET PermissionMinutes = :pm,
+                                Reason = :r,
+                                ApprovalStatus = 'APPROVED',
+                                ApprovedBy = :by,
+                                ApprovedAt = SYSDATETIME(),
+                                UpdatedBy = :by,
+                                UpdatedAt = SYSDATETIME()
+                            WHERE PermissionId = :id
+                        """),
+                        {"id": existing_ep, "pm": early_perm_mins, "r": ep_reason, "by": rev_by},
+                    )
+                else:
+                    db.execute(
+                        text("""
+                            INSERT INTO dbo.Attendance_Permission (
+                                EmployeeCode, AttendanceDate, PermissionMinutes,
+                                PermissionType, Reason, ApprovalStatus, ApprovedBy, ApprovedAt,
+                                CreatedBy
+                            )
+                            VALUES (
+                                :c, :d, :pm, 'EARLY_EXIT', :r, 'APPROVED', :by, SYSDATETIME(), :by
+                            )
+                        """),
+                        {"c": emp_code, "d": att_date, "pm": early_perm_mins, "r": ep_reason, "by": rev_by},
                     )
 
             # 4. Synchronize persistent On-Site status into dbo.Employee_Mst
@@ -751,6 +798,31 @@ class AttendanceAdjustmentService:
                     {"employee_code": emp_code, "reviewed_by": rev_by},
                 )
 
+            # 5. Automatically waive late fine if authorized for On-Duty, On-Site, WFH or if Permission was granted
+            if data.review_status in ("ON_DUTY", "ON_SITE", "ON_FIELD", "WFH", "WORK_FROM_HOME") or early_perm_mins > 0 or perm_mins > 0:
+                for d in dates_to_process:
+                    db.execute(
+                        text("""
+                            UPDATE dbo.Attendance_Late_Fine
+                            SET FineStatus = 'WAIVED',
+                                FineAmount = 0,
+                                WaivedBy = :reviewed_by,
+                                WaivedAt = SYSDATETIME(),
+                                Reason = COALESCE(Reason, :waive_reason),
+                                UpdatedBy = :reviewed_by,
+                                UpdatedAt = SYSDATETIME()
+                            WHERE EmployeeCode = :employee_code
+                              AND AttendanceDate = :attendance_date
+                              AND FineStatus != 'WAIVED'
+                        """),
+                        {
+                            "employee_code": emp_code,
+                            "attendance_date": d,
+                            "reviewed_by": rev_by,
+                            "waive_reason": f"Waived due to authorized {data.review_status}" if data.review_status in ("ON_DUTY", "ON_SITE", "ON_FIELD", "WFH", "WORK_FROM_HOME") else "Waived due to authorized permission",
+                        },
+                    )
+
             return {
                 "employee_code": data.employee_code,
                 "attendance_date": data.attendance_date,
@@ -787,6 +859,11 @@ class AttendanceAdjustmentService:
                         AllowedUntil = :allowed_until,
                         PermissionMinutesApplied = :permission_minutes_applied,
                         LateMinutes = :late_minutes,
+                        ActualCheckOut = :actual_check_out,
+                        ShiftEndTime = :shift_end_time,
+                        EarlyExitMinutes = :early_exit_minutes,
+                        EarlyPermissionMinutes = :early_permission_minutes,
+                        FineType = :fine_type,
                         FineAmount = :fine_amount,
                         CurrencyCode = 'INR',
                         FineStatus = :fine_status,
@@ -822,7 +899,9 @@ class AttendanceAdjustmentService:
                         (
                             EmployeeCode, AttendanceDate, ActualCheckIn,
                             ShiftStartTime, AllowedUntil, PermissionMinutesApplied,
-                            LateMinutes, FineAmount, CurrencyCode, FineStatus,
+                            LateMinutes, ActualCheckOut, ShiftEndTime,
+                            EarlyExitMinutes, EarlyPermissionMinutes, FineType,
+                            FineAmount, CurrencyCode, FineStatus,
                             Reason, EnteredBy, ConfirmedBy, ConfirmedAt,
                             WaivedBy, WaivedAt
                         )
@@ -830,7 +909,9 @@ class AttendanceAdjustmentService:
                         (
                             :employee_code, :attendance_date, :actual_check_in,
                             :shift_start_time, :allowed_until, :permission_minutes_applied,
-                            :late_minutes, :fine_amount, 'INR', :fine_status,
+                            :late_minutes, :actual_check_out, :shift_end_time,
+                            :early_exit_minutes, :early_permission_minutes, :fine_type,
+                            :fine_amount, 'INR', :fine_status,
                             :reason, :entered_by,
                             CASE WHEN :fine_status = 'CONFIRMED' THEN :entered_by END,
                             CASE WHEN :fine_status = 'CONFIRMED' THEN SYSDATETIME() END,
@@ -844,11 +925,11 @@ class AttendanceAdjustmentService:
             # Sync to dbo.Attendance_Permission if permission_minutes_applied > 0
             perm_applied = data.permission_minutes_applied or 0
             if perm_applied > 0:
-                p_reason = (reason or f"Permission applied ({perm_applied} mins) in Late Fine")[:500]
+                p_reason = (reason or f"Late permission applied ({perm_applied} mins)")[:500]
                 existing_perm = db.execute(
                     text("""
                         SELECT PermissionId FROM dbo.Attendance_Permission
-                        WHERE EmployeeCode = :c AND AttendanceDate = :d
+                        WHERE EmployeeCode = :c AND AttendanceDate = :d AND (PermissionType = 'LATE_ARRIVAL' OR PermissionType = 'OFFICIAL' OR PermissionType IS NULL)
                     """),
                     {"c": emp_code, "d": att_date},
                 ).scalar()
@@ -877,16 +958,61 @@ class AttendanceAdjustmentService:
                                 CreatedBy
                             )
                             VALUES (
-                                :c, :d, :pm, 'OFFICIAL', :r, 'APPROVED', :by, SYSDATETIME(), :by
+                                :c, :d, :pm, 'LATE_ARRIVAL', :r, 'APPROVED', :by, SYSDATETIME(), :by
                             )
                         """),
                         {"c": emp_code, "d": att_date, "pm": perm_applied, "r": p_reason, "by": entered_by},
+                    )
+
+            # Sync Early Exit Permission if early_permission_minutes > 0
+            early_perm_applied = data.early_permission_minutes or 0
+            if early_perm_applied > 0:
+                ep_reason = (reason or f"Early exit permission applied ({early_perm_applied} mins)")[:500]
+                existing_ep = db.execute(
+                    text("""
+                        SELECT PermissionId FROM dbo.Attendance_Permission
+                        WHERE EmployeeCode = :c AND AttendanceDate = :d AND PermissionType = 'EARLY_EXIT'
+                    """),
+                    {"c": emp_code, "d": att_date},
+                ).scalar()
+
+                if existing_ep:
+                    db.execute(
+                        text("""
+                            UPDATE dbo.Attendance_Permission
+                            SET PermissionMinutes = :pm,
+                                Reason = :r,
+                                ApprovalStatus = 'APPROVED',
+                                ApprovedBy = :by,
+                                ApprovedAt = SYSDATETIME(),
+                                UpdatedBy = :by,
+                                UpdatedAt = SYSDATETIME()
+                            WHERE PermissionId = :id
+                        """),
+                        {"id": existing_ep, "pm": early_perm_applied, "r": ep_reason, "by": entered_by},
+                    )
+                else:
+                    db.execute(
+                        text("""
+                            INSERT INTO dbo.Attendance_Permission (
+                                EmployeeCode, AttendanceDate, PermissionMinutes,
+                                PermissionType, Reason, ApprovalStatus, ApprovedBy, ApprovedAt,
+                                CreatedBy
+                            )
+                            VALUES (
+                                :c, :d, :pm, 'EARLY_EXIT', :r, 'APPROVED', :by, SYSDATETIME(), :by
+                            )
+                        """),
+                        {"c": emp_code, "d": att_date, "pm": early_perm_applied, "r": ep_reason, "by": entered_by},
                     )
 
             return {
                 "employee_code": data.employee_code,
                 "attendance_date": data.attendance_date,
                 "late_minutes": data.late_minutes,
+                "early_exit_minutes": data.early_exit_minutes or 0,
+                "early_permission_minutes": data.early_permission_minutes or 0,
+                "fine_type": data.fine_type or "LATE_ARRIVAL",
                 "fine_amount": data.fine_amount,
                 "fine_status": data.fine_status,
             }
@@ -931,7 +1057,8 @@ class AttendanceAdjustmentService:
                 SELECT 
                     FineId, EmployeeCode, AttendanceDate, ActualCheckIn,
                     ShiftStartTime, AllowedUntil, PermissionMinutesApplied,
-                    LateMinutes, FineAmount, CurrencyCode, FineStatus,
+                    LateMinutes, ActualCheckOut, ShiftEndTime, EarlyExitMinutes,
+                    EarlyPermissionMinutes, FineType, FineAmount, CurrencyCode, FineStatus,
                     Reason, EnteredBy, ConfirmedBy, WaivedBy
                 FROM dbo.Attendance_Late_Fine
                 WHERE MONTH(AttendanceDate) = :m AND YEAR(AttendanceDate) = :y
@@ -958,6 +1085,11 @@ class AttendanceAdjustmentService:
                     allowed_until=r["AllowedUntil"],
                     permission_minutes_applied=int(r["PermissionMinutesApplied"] or 0),
                     late_minutes=int(r["LateMinutes"] or 0),
+                    actual_check_out=r.get("ActualCheckOut"),
+                    shift_end_time=r.get("ShiftEndTime"),
+                    early_exit_minutes=int(r.get("EarlyExitMinutes") or 0),
+                    early_permission_minutes=int(r.get("EarlyPermissionMinutes") or 0),
+                    fine_type=r.get("FineType") or "LATE_ARRIVAL",
                     fine_amount=r["FineAmount"],
                     currency_code=r["CurrencyCode"] or "INR",
                     fine_status=r["FineStatus"],
@@ -1028,8 +1160,8 @@ class AttendanceAdjustmentService:
                     if (app_code, log_d) not in fines_by_key and app_code in emp_map:
                         emp = emp_map.get(app_code, {"name": app_code})
                         fi = lr["first_in"]
-                        shift_dt = datetime.combine(log_d, time(9, 30))
-                        late_mins = max(0, int((fi - shift_dt).total_seconds() // 60))
+                        grace_dt = datetime.combine(log_d, time(9, 40))
+                        late_mins = max(0, int((fi - grace_dt).total_seconds() // 60))
                         records.append(
                             MonthlyLateFineRecord(
                                 fine_id=None,
@@ -1052,3 +1184,32 @@ class AttendanceAdjustmentService:
 
         records.sort(key=lambda x: (x.attendance_date, x.employee_name), reverse=True)
         return records
+
+    @staticmethod
+    def update_employee_shift_timing(db: Session, data: EmployeeShiftTimingUpdate):
+        AttendanceAdjustmentService._validate_employee(db, data.employee_code)
+
+        def action():
+            emp_code = str(data.employee_code).strip()
+            db.execute(
+                text("""
+                    UPDATE dbo.Employee_Mst
+                    SET ShiftEndTime = :shift_end,
+                        ShiftStartTime = :shift_start,
+                        UpdatedAt = SYSDATETIME()
+                    WHERE EmployeeCode = :code
+                """),
+                {
+                    "code": emp_code,
+                    "shift_end": data.shift_end_time,
+                    "shift_start": data.shift_start_time,
+                },
+            )
+            return {
+                "employee_code": emp_code,
+                "shift_end_time": str(data.shift_end_time) if data.shift_end_time else None,
+                "shift_start_time": str(data.shift_start_time) if data.shift_start_time else None,
+                "message": f"Assigned shift closing time for {emp_code} updated successfully.",
+            }
+
+        return AttendanceAdjustmentService._commit(db, action)

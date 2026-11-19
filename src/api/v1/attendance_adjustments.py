@@ -12,6 +12,7 @@ from src.schemas.attendance import (
     LeaveCreate,
     MonthlyLateFineRecord,
     PermissionCreate,
+    EmployeeShiftTimingUpdate,
 )
 from src.services.attendance_adjustment_service import (
     AttendanceAdjustmentService,
@@ -74,6 +75,14 @@ def save_late_fine(
     db: Session = Depends(get_mssql_session("db2")),
 ):
     return AttendanceAdjustmentService.save_late_fine(db, data)
+
+
+@router.put("/employee-shift-timing")
+def update_employee_shift_timing(
+    data: EmployeeShiftTimingUpdate,
+    db: Session = Depends(get_mssql_session("db2")),
+):
+    return AttendanceAdjustmentService.update_employee_shift_timing(db, data)
 
 
 @router.get("/monthly-late-fines", response_model=List[MonthlyLateFineRecord])

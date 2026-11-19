@@ -18,6 +18,7 @@ from src.api.v1.transaction.delivery_challan import router as delivery_router
 from src.api.v1.transaction.proforma import router as proforma_router
 from src.api.v1.transaction.quotation import router as quotation_router
 from src.api.v1.transaction.sales_invoices import router as sales_invoice_router
+from src.api.v1.transaction.receipts import router as receipt_router
 from src.api.v1.transaction.tally_upload import router as tally_router
 from src.api.v1.transaction.customer_report import router as customer_report_router
 from src.api.v1.expense.travel_expense import router as travel_expense_router
@@ -43,6 +44,7 @@ api_router.include_router(quotation_router, prefix="/transaction")
 api_router.include_router(proforma_router, prefix="/transaction")
 api_router.include_router(delivery_router, prefix="/transaction")
 api_router.include_router(sales_invoice_router, prefix="/transaction")
+api_router.include_router(receipt_router, prefix="/transaction")
 api_router.include_router(tally_router, prefix="/transaction")
 api_router.include_router(customer_report_router, prefix="/transaction")
 
@@ -66,6 +68,7 @@ __all__ = [
     "proforma_router",
     "delivery_router",
     "sales_invoice_router",
+    "receipt_router",
     "tally_router",
     "customer_report_router",
     "office_expense_router",

@@ -299,11 +299,12 @@ def create_ledger(db: Session, payload: LedgerCreate):
         )
 
     try:
-        opening_bal = Decimal(str(payload.OpeningBalance or 0))
+        val_str = str(payload.OpeningBalance or "").strip()
+        opening_bal = Decimal(val_str) if val_str else Decimal(0)
     except Exception:
         opening_bal = Decimal(0)
 
-    balance_type = payload.BalanceType or ("Dr" if payload.LedgerType == "General Ledger" else "Cr")
+    balance_type = payload.BalanceType or ("Dr" if payload.LedgerType in ("General Ledger", "Customer") else "Cr")
 
     try:
         if payload.LedgerType == "General Ledger":
@@ -485,7 +486,7 @@ def update_ledger(
     # Check if Party Ledger or General Ledger
     party_existing = db.execute(
         text("""
-            SELECT TOP 1 LedgerCode, LedgerName
+            SELECT TOP 1 LedgerCode, LedgerName, OpeningBalance, BalanceType
             FROM dbo.Acc_Mst_Ledger
             WHERE LedgerCode = :code
               AND Status <> 'Delete'
@@ -497,7 +498,7 @@ def update_ledger(
     if not party_existing:
         general_existing = db.execute(
             text("""
-                SELECT TOP 1 AccGenLdgCode, AccGenLdgName
+                SELECT TOP 1 AccGenLdgCode, AccGenLdgName, OpeningBalance, BalanceType
                 FROM dbo.Acc_Mst_GeneralLedger
                 WHERE AccGenLdgCode = :code
                   AND Status <> 'Delete'
@@ -513,9 +514,13 @@ def update_ledger(
 
     opening_bal = None
     if payload.OpeningBalance is not None:
-        try:
-            opening_bal = Decimal(str(payload.OpeningBalance))
-        except Exception:
+        val_str = str(payload.OpeningBalance).strip()
+        if val_str != "":
+            try:
+                opening_bal = Decimal(val_str)
+            except Exception:
+                opening_bal = Decimal(0)
+        else:
             opening_bal = Decimal(0)
 
     try:

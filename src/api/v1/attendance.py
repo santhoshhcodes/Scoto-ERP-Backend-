@@ -12,8 +12,10 @@ from src.schemas.attendance import (
     DailyAttendanceSummaryRecord,
     DailyReconciliationRecord,
     MonthlySummaryResponse,
+    EmployeeShiftTimingUpdate,
 )
 from src.services.attendance_service import AttendanceService
+from src.services.attendance_adjustment_service import AttendanceAdjustmentService
 from src.services.holiday_service import HolidayService
 from src.services.device_service import DeviceService
 
@@ -197,3 +199,11 @@ def delete_holiday(
     db: Session = Depends(get_mssql_session("db2")),
 ):
     return HolidayService.delete_holiday(db=db, holiday_id=holiday_id)
+
+
+@router.put("/employee-shift-timing", status_code=status.HTTP_200_OK)
+def update_employee_shift_timing(
+    data: EmployeeShiftTimingUpdate,
+    db: Session = Depends(get_mssql_session("db2")),
+):
+    return AttendanceAdjustmentService.update_employee_shift_timing(db=db, data=data)

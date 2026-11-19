@@ -1,4 +1,4 @@
-﻿
+
 from typing import Optional
 
 from fastapi import APIRouter, Depends, Query
@@ -42,7 +42,7 @@ def create_ledger(
     return ledger_services.create_ledger(db, payload)
 
 
-@router.put("/{ledger_code}")
+@router.put("/{ledger_code:path}")
 def edit_ledger(
     ledger_code: str,
     payload: LedgerUpdate,
@@ -55,7 +55,7 @@ def edit_ledger(
     )
 
 
-@router.delete("/{ledger_code}")
+@router.delete("/{ledger_code:path}")
 def remove_ledger(
     ledger_code: str,
     db: Session = Depends(get_mssql_session("db2")),

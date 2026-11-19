@@ -1,7 +1,7 @@
 from fastapi.responses import StreamingResponse
-from typing import Optional
+from typing import Optional, List, Dict, Any
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, Query, File, UploadFile, Body
 from sqlalchemy.orm import Session
 
 from src.api.deps import get_mssql_session
@@ -12,6 +12,7 @@ from src.schemas.sales_invoice import (
 )
 from src.services import sales_invoice_service as service
 from src.services.sales_invoice_excel_service import SalesInvoiceExcelService
+from src.services.sales_invoice_upload_service import SalesInvoiceUploadService
 
 router = APIRouter(prefix="/sales-invoices", tags=["Transaction - Sales Invoice"])
 
@@ -42,6 +43,49 @@ def list_proforma_invoices(
     # The source query does not filter by these parameters; retained for API compatibility.
     return service.get_available_proforma_invoices(db)
 
+
+
+@router.post("/bulk-upload-preview")
+async def bulk_upload_preview(
+    files: List[UploadFile] = File(...),
+    company_code: Optional[str] = Query(default="SCT"),
+    location_code: Optional[str] = Query(default="UNIT I"),
+    db: Session = Depends(get_mssql_session("db2")),
+):
+    """
+    Parses up to 100 Excel invoices and generates the 3-Table Preview & Reconciliation analysis.
+    """
+    service.ensure_sales_invoice_tables_exist(db)
+    file_tuples = []
+    for f in files:
+        content = await f.read()
+        file_tuples.append((f.filename, content))
+    return SalesInvoiceUploadService.reconcile_and_preview(
+        db=db,
+        files=file_tuples,
+        c_code=company_code,
+        l_code=location_code,
+    )
+
+
+@router.post("/bulk-upload-commit")
+def bulk_upload_commit(
+    payload: Dict[str, Any] = Body(...),
+    company_code: Optional[str] = Query(default="SCT"),
+    location_code: Optional[str] = Query(default="UNIT I"),
+    db: Session = Depends(get_mssql_session("db2")),
+):
+    """
+    Commits approved invoices, line items, and auto-created customer ledgers into the database.
+    """
+    service.ensure_sales_invoice_tables_exist(db)
+    return SalesInvoiceUploadService.commit_bulk_invoices(
+        db=db,
+        payload=payload,
+        c_code=company_code,
+        l_code=location_code,
+        user_name="ACCSCOTO",
+    )
 
 
 @router.get("/{trans_no:path}/export-excel")

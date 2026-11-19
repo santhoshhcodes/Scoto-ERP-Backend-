@@ -234,8 +234,8 @@ class DeliveryChallanService:
         """)
 
         db.execute(query, {
-            "Ccode": "01",
-            "Lcode": "01",
+            "Ccode": "SCT",
+            "Lcode": "UNIT I",
             "Deliveryno": delivery_no,
             "Deliverydate": payload.Deliverydate,
             "Returntype": payload.Returntype or "",
@@ -279,8 +279,8 @@ class DeliveryChallanService:
 
         for item in items:
             db.execute(query, {
-                "Ccode": "01",
-                "Lcode": "01",
+                "Ccode": "SCT",
+                "Lcode": "UNIT I",
                 "Deliveryno": delivery_no,
                 "Item": item.Item,
                 "HSN": item.HSN or "",

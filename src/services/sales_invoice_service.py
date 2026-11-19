@@ -251,6 +251,43 @@ def get_sales_invoices(
             WHERE TransNo = :trans_no AND (Status IS NULL OR Status <> 'Delete')
         """), {"trans_no": item["TransNo"]}).scalar() or 0
         data.append(item)
+
+    if data:
+        try:
+            from src.services.customer_report_service import CustomerReportService
+
+            # Group invoices by customer
+            cust_inv_map = {}
+            for item in data:
+                c_code = (item.get("CustomerCode") or "").strip().lower()
+                c_name = (item.get("CustomerName") or "").strip().lower()
+                c_key = c_name or c_code
+                if c_key:
+                    cust_inv_map.setdefault(c_key, []).append((c_code, c_name, item))
+
+            # Fetch all receipts from Acc_Trans_All
+            receipts_sql = """
+                SELECT TransNo, TransDate, LeaderCode, LedgerName, CreditAmount, Narration
+                FROM dbo.Acc_Trans_All
+                WHERE (TransType IN ('Receipt', 'Bank Receipt', 'Cash Receipts', 'Coral Receipt Entry') OR CreditAmount > 0)
+                  AND (Status IS NULL OR Status <> 'Delete')
+            """
+            all_receipts = [dict(r) for r in db.execute(text(receipts_sql)).mappings().all()]
+
+            for c_key, entries in cust_inv_map.items():
+                c_invs = [e[2] for e in entries]
+                c_codes = {e[0] for e in entries if e[0]}
+                c_names = {e[1] for e in entries if e[1]}
+
+                c_receipts = [
+                    r for r in all_receipts
+                    if any(c_code and c_code != 'na' and c_code in str(r.get("LeaderCode") or "").strip().lower() for c_code in c_codes)
+                       or any(c_name and (c_name in str(r.get("LedgerName") or "").strip().lower() or str(r.get("LedgerName") or "").strip().lower() in c_name) for c_name in c_names)
+                ]
+                CustomerReportService.calculate_invoices_payment_status(c_invs, c_receipts)
+        except Exception:
+            pass
+
     return {"status": "success", "data": data, "total": len(data)}
 
 

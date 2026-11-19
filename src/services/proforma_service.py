@@ -22,8 +22,8 @@ class ProformaInvoiceService:
         IF OBJECT_ID('dbo.Acc_Proforma_Inv_Main', 'U') IS NULL
         BEGIN
             CREATE TABLE dbo.Acc_Proforma_Inv_Main (
-                Ccode VARCHAR(10) DEFAULT '01',
-                Lcode VARCHAR(10) DEFAULT '01',
+                Ccode VARCHAR(10) DEFAULT 'SCT',
+                Lcode VARCHAR(10) DEFAULT 'UNIT I',
                 FinYearVal VARCHAR(20) DEFAULT '2026-2027',
                 FinYearCode VARCHAR(10) DEFAULT '01',
                 TransNo VARCHAR(50) PRIMARY KEY,
@@ -57,8 +57,8 @@ class ProformaInvoiceService:
         IF OBJECT_ID('dbo.Acc_Proforma_Inv_Sub', 'U') IS NULL
         BEGIN
             CREATE TABLE dbo.Acc_Proforma_Inv_Sub (
-                Ccode VARCHAR(10) DEFAULT '01',
-                Lcode VARCHAR(10) DEFAULT '01',
+                Ccode VARCHAR(10) DEFAULT 'SCT',
+                Lcode VARCHAR(10) DEFAULT 'UNIT I',
                 FinYearCode VARCHAR(10) DEFAULT '01',
                 FinYearVal VARCHAR(20) DEFAULT '2026-2027',
                 TransNo VARCHAR(50),
@@ -299,7 +299,7 @@ class ProformaInvoiceService:
                 SysIp, SysName, CreateOn
             )
             VALUES (
-                '01', '01', '01', :fin_year_val,
+                'SCT', 'UNIT I', '01', :fin_year_val,
                 :trans_no, :trans_date, :quo_no, :quo_date,
                 :cust_code, :cust_name, :item_code, :prod_type,
                 :hsn, :qty, :rate, :item_val, :gst, :cgst, :sgst,
@@ -383,7 +383,7 @@ class ProformaInvoiceService:
                         UserName, UserCode, SysIp, SysName, CreateOn
                     )
                     VALUES (
-                        '01', '01', :fin_year_val, '01',
+                        'SCT', 'UNIT I', :fin_year_val, '01',
                         :trans_no, :trans_date, :quo_no, :quo_date,
                         :cust_code, :cust_name, :tot_qty,
                         :tot_item_amt, :tot_cgst, :tot_sgst,

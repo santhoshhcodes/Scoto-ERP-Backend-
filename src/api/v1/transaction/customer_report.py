@@ -1,9 +1,11 @@
 from typing import Optional
 from fastapi import APIRouter, Depends, Query
+from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 
 from src.api.deps import get_mssql_session
 from src.services.customer_report_service import CustomerReportService
+from src.services.customer_report_excel_service import CustomerReportExcelService
 
 router = APIRouter(
     prefix="/customer-report",
@@ -77,5 +79,36 @@ def get_customer_dossier_by_query(
         db=db,
         client_code=client_code,
         fin_year=fin_year,
+    )
+
+
+@router.get("/export-excel/{client_code:path}")
+@router.get("/{client_code:path}/export-excel")
+def export_customer_dossier_excel(
+    client_code: str,
+    fin_year: Optional[str] = Query(default="ALL"),
+    tab: Optional[str] = Query(default="ALL"),
+    db: Session = Depends(get_mssql_session("db2")),
+):
+    """
+    Exports the comprehensive Customer 360 Report & Ledger Dossier as an Executive Excel Workbook (.xlsx).
+    Includes Summary & KYC, Sales Invoices & Settlement, Advance Milestones, Statement of Account, and Receipts.
+    """
+    excel_stream = CustomerReportExcelService.generate_excel(
+        db=db,
+        client_code=client_code,
+        fin_year=fin_year,
+        tab=tab,
+    )
+    safe_code = client_code.replace("/", "_").replace("\\", "_").replace(" ", "_").strip()
+    safe_fy = (fin_year or "ALL").replace("/", "_").replace("\\", "_").replace(" ", "_").strip()
+    filename = f"Customer_Dossier_{safe_code}_{safe_fy}.xlsx"
+    headers = {
+        "Content-Disposition": f'attachment; filename="{filename}"'
+    }
+    return StreamingResponse(
+        excel_stream,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers=headers,
     )
 

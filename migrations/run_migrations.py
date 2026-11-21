@@ -39,21 +39,39 @@ def run_migration_file(cursor, file_path: str):
 def main():
     parser = argparse.ArgumentParser(description="Run MSSQL migrations for Scoto ERP")
     parser.add_argument("--db", type=str, default=None, help="Target database name (default: from .env DB_KEY_DB2)")
+    parser.add_argument("--server", type=str, default=None, help="MSSQL server host (default: from .env MSSQL_SERVER)")
+    parser.add_argument("--port", type=int, default=None, help="MSSQL port (default: from .env MSSQL_PORT)")
+    parser.add_argument("--user", type=str, default=None, help="MSSQL username (default: from .env MSSQL_USER)")
+    parser.add_argument("--password", type=str, default=None, help="MSSQL password (default: from .env MSSQL_PASSWORD)")
     parser.add_argument("--file", type=str, default=None, help="Specific migration file to run (optional)")
     args = parser.parse_args()
 
+    target_server = args.server or settings.MSSQL_SERVER
+    target_port = args.port or settings.MSSQL_PORT
+    target_user = args.user or settings.MSSQL_USER
+    target_password = args.password if args.password is not None else settings.MSSQL_PASSWORD
     target_db = args.db or settings.databases_map.get("db2", "SCOTO_ACC_ERP")
-    print(f"=== Running Migrations on Database: [{target_db}] ===")
-    print(f"Server: {settings.MSSQL_SERVER}:{settings.MSSQL_PORT} | User: {settings.MSSQL_USER}")
 
-    conn = pymssql.connect(
-        server=settings.MSSQL_SERVER,
-        port=settings.MSSQL_PORT,
-        user=settings.MSSQL_USER,
-        password=settings.MSSQL_PASSWORD,
-        database=target_db,
-        autocommit=True
-    )
+    print(f"=== Running Migrations on Database: [{target_db}] ===")
+    print(f"Server: {target_server}:{target_port} | User: {target_user}")
+
+    try:
+        conn = pymssql.connect(
+            server=target_server,
+            port=target_port,
+            user=target_user,
+            password=target_password,
+            database=target_db,
+            autocommit=True
+        )
+    except Exception as e:
+        print(f"\n[X] Connection Failed: {e}")
+        print("\nTroubleshooting tips for Error 18456 (Login failed for user):")
+        print("  1. Verify the SQL password for user 'sa' in your .env file (MSSQL_PASSWORD).")
+        print("  2. Or pass credentials directly via CLI: python migrations/run_migrations.py --user sa --password <YOUR_PASSWORD> --db scotoAdmin")
+        print("  3. Alternatively, open the SQL scripts directly in SQL Server Management Studio (SSMS) using Windows Authentication.\n")
+        sys.exit(1)
+
     cursor = conn.cursor()
 
     migrations_dir = os.path.join(root_dir, "migrations")

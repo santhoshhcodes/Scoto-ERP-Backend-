@@ -71,6 +71,197 @@ class SalesInvoiceUploadService:
         s = re.sub(r"[\.,\'\"\-\s]+$", "", s).strip()
         return s
 
+    @staticmethod
+    def _normalize_unit_str(raw: str) -> str:
+        if not raw:
+            return ""
+        s = raw.strip().upper()
+        if s in ("CO", "CENTRAL OFFICE", "CORPORATE OFFICE", "HEAD OFFICE", "HO", "UNIT CO"):
+            return "UNIT CO"
+        s = re.sub(r"[\(\)\[\]]", "", s).strip()
+        # Handle '<token> - UNIT' or '<token>-UNIT' e.g. 'K-UNIT', 'A - UNIT', 'C&D UNIT'
+        m1 = re.match(r"^([A-Z0-9&/\s]+?)\s*[-_]?\s*(?:UNIT|PLANT|SITE|DIV|DIVISION)$", s)
+        if m1:
+            token = m1.group(1).strip()
+            if token in ("CO", "CENTRAL OFFICE", "CORPORATE OFFICE", "HEAD OFFICE", "HO"):
+                return "UNIT CO"
+            return f"UNIT {token}"
+        # Handle 'UNIT - <token>' or 'UNIT <token>'
+        m2 = re.match(r"^(?:UNIT|PLANT|SITE|DIV|DIVISION)\s*[-_:]?\s*([A-Z0-9&/\s]+)$", s)
+        if m2:
+            token = m2.group(1).strip()
+            return f"UNIT {token}"
+        return s
+
+    @classmethod
+    def _get_canonical_unit_token(cls, u: str) -> str:
+        if not u:
+            return ""
+        norm = cls._normalize_unit_str(u)
+        tok = re.sub(r"^(?:UNIT|PLANT|SITE|DIV|DIVISION)\s*", "", norm).strip().replace("-", "").replace(" ", "")
+        return tok
+
+    @classmethod
+    def _unit_matches(cls, u1: str, u2: str) -> bool:
+        if not u1 or not u2:
+            return False
+        c1 = cls._get_canonical_unit_token(u1)
+        c2 = cls._get_canonical_unit_token(u2)
+        if not c1 or not c2:
+            return False
+        if c1 == c2:
+            return True
+        # Match composites like 'C&D' with 'C' or 'D'
+        parts1 = set(filter(None, re.split(r"[&/\s]+", c1)))
+        parts2 = set(filter(None, re.split(r"[&/\s]+", c2)))
+        return bool(parts1.intersection(parts2))
+
+    @classmethod
+    def _extract_unit_from_text(cls, text: str) -> str:
+        if not text:
+            return ""
+        s = str(text).strip()
+
+        # 1. Corporate Office / Central Office / CO
+        co_m = re.search(r"[\(\[]\s*(CO|CENTRAL\s+OFFICE|CORPORATE\s+OFFICE|HEAD\s+OFFICE|HO)\s*[\)\]]", s, re.IGNORECASE)
+        if co_m:
+            return "UNIT CO"
+        co_word = re.search(r"\b(CENTRAL\s+OFFICE|CORPORATE\s+OFFICE|HEAD\s+OFFICE)\b", s, re.IGNORECASE)
+        if co_word:
+            return "UNIT CO"
+
+        # 2. Parens: e.g. (K-UNIT), (H-UNIT), (A-UNIT), (M-UNIT), (C&D UNIT), (UNIT A), (UNIT 1)
+        p_m = re.search(r"[\(\[]\s*([A-Z0-9&/\s]+?)\s*[-_]?\s*(?:UNIT|PLANT|SITE|DIV)\s*[\)\]]", s, re.IGNORECASE)
+        if p_m:
+            val = p_m.group(1).strip().upper()
+            if val not in ("THE", "OUR", "TOTAL"):
+                return cls._normalize_unit_str(p_m.group(0))
+
+        p_m2 = re.search(r"[\(\[]\s*(?:UNIT|PLANT|SITE|DIV)\s*[-_:]?\s*([A-Z0-9&/\s]+?)\s*[\)\]]", s, re.IGNORECASE)
+        if p_m2:
+            val = p_m2.group(1).strip().upper()
+            return cls._normalize_unit_str(p_m2.group(0))
+
+        # 3. Delimited / Leading: e.g. 'K - UNIT,', 'H-UNIT,', 'A - UNIT,', 'M - UNIT,', 'C - UNIT,'
+        d_m = re.search(r"(?:^|[\s\-_–,/])\b([A-Z0-9&]+)\s*[-_]\s*(?:UNIT|PLANT|SITE)\b", s, re.IGNORECASE)
+        if d_m:
+            token = d_m.group(1).strip().upper()
+            if token not in ("PER", "EACH", "THE", "OUR", "IN", "NO"):
+                return f"UNIT {token}"
+
+        # 4. Standard 'UNIT <token>' or 'UNIT-<token>'
+        u_m = re.search(r"\b(?:UNIT|PLANT|SITE)\s*[-_:]?\s*([A-Z0-9&]+)\b", s, re.IGNORECASE)
+        if u_m:
+            token = u_m.group(1).strip().upper()
+            if token not in ("NO", "PRICE", "RATE", "TOTAL", "DATE"):
+                return f"UNIT {token}"
+
+        return ""
+
+    @classmethod
+    def _extract_info_from_filename(cls, filename: str) -> Dict[str, str]:
+        """
+        Extracts structured invoice intelligence directly from the uploaded Excel file name:
+          - invoice_no (e.g. 'SI2627-018', 'SCT-24-25-0145', 'INV-045')
+          - unit (e.g. 'UNIT K', 'UNIT H', 'UNIT CO', 'UNIT A', 'UNIT M', 'UNIT C&D')
+        """
+        if not filename:
+            return {"inv_no": "", "unit": ""}
+
+        base = re.sub(r"(?i)\.(xlsx?|xlsm|csv)$", "", str(filename).strip())
+        base = base.replace("\\", "/").split("/")[-1].strip()
+        norm_base = re.sub(r"[_]+", " ", base).strip()
+
+        # 1. Extract Unit from filename using smart unit parser
+        unit = cls._extract_unit_from_text(base) or cls._extract_unit_from_text(norm_base)
+
+        # 2. Extract Invoice No from filename
+        inv_no = ""
+        # Match SI patterns like SI2627-018, SI24-001, SI-2627-014
+        si_m = re.search(r"\b(SI[-_]?(?:2[0-9][-_/]?[0-9]{2})?[-_]?[0-9]{2,6}[a-zA-Z]?)\b", base, re.IGNORECASE)
+        if si_m:
+            inv_no = si_m.group(1).replace("_", "-").strip()
+        else:
+            sct_m = re.search(r"\b(SCT[-/_\s]?(?:2[0-9][-_/][0-9]{2})?[-/_\s]?[0-9]+[a-zA-Z]?)\b", base, re.IGNORECASE)
+            if sct_m:
+                inv_no = sct_m.group(1).replace("_", "-").strip()
+            else:
+                inv_m = re.search(r"\b((?:INV|INVOICE|PI|BILL)[-_#\s]*[0-9]+(?:[-/][0-9a-zA-Z]+)*)\b", norm_base, re.IGNORECASE)
+                if inv_m:
+                    inv_no = inv_m.group(1).strip()
+                else:
+                    tokens = [t.strip() for t in re.split(r"[-–_\s]+", base) if t.strip()]
+                    for tok in tokens:
+                        if re.match(r"^\d{3,6}$", tok):
+                            inv_no = tok
+                            break
+
+        return {"inv_no": inv_no, "unit": unit}
+
+    @classmethod
+    def _build_customer_lookup_key(cls, gst: str, base_name: str, unit: str) -> str:
+        gst_norm = (gst or "").strip().upper()
+        tok = cls._get_canonical_unit_token(unit).lower()
+        if tok:
+            return f"{gst_norm}__{tok}" if gst_norm else f"{base_name.lower().strip()}__{tok}"
+        return gst_norm if gst_norm else cls._clean_customer_name(base_name).lower()
+
+    @classmethod
+    def _extract_unit_and_base_name(
+        cls,
+        name: str,
+        address_lines: Optional[List[str]] = None,
+        filename: Optional[str] = None,
+    ) -> Tuple[str, str, str]:
+        """
+        Intelligently parses customer/party name, address, and excel filename to detect factory/plant units
+        (e.g., 'Unit A', 'Unit CA', 'Unit K', 'Unit H', 'Unit CO', 'Plant 2', 'Spinning Unit').
+        Returns:
+            (base_name, unit_str, full_ledger_name)
+        If no unit is detected, unit_str is "" and full_ledger_name == base_name.
+        """
+        if not name:
+            if filename:
+                fn_info = cls._extract_info_from_filename(filename)
+                unit_str = fn_info.get("unit", "")
+                return ("", unit_str, f"- {unit_str}" if unit_str else "")
+            return ("", "", "")
+
+        s = cls._clean_customer_name(name)
+        unit_str = ""
+
+        # 1. Check unit inside customer name
+        unit_str = cls._extract_unit_from_text(s)
+        if unit_str:
+            # Strip unit mention from name
+            s = re.sub(r"\(\s*" + re.escape(unit_str) + r"\s*\)", "", s, flags=re.IGNORECASE).strip()
+            s = re.sub(r"[-–,/]\s*" + re.escape(unit_str) + r"\b", "", s, flags=re.IGNORECASE).strip()
+            s = re.sub(r"\b" + re.escape(unit_str) + r"\b", "", s, flags=re.IGNORECASE).strip()
+
+        # 2. If no unit found in name, inspect address lines
+        if not unit_str and address_lines:
+            for line in address_lines:
+                if not line:
+                    continue
+                u_cand = cls._extract_unit_from_text(str(line))
+                if u_cand:
+                    unit_str = u_cand
+                    break
+
+        # 3. If still no unit found, inspect the Excel file name!
+        if not unit_str and filename:
+            fn_info = cls._extract_info_from_filename(filename)
+            if fn_info.get("unit"):
+                unit_str = fn_info["unit"]
+
+        # Clean residual empty parentheses or separators from base name
+        s = re.sub(r"\(\s*\)", "", s).strip()
+        s = re.sub(r"[\.,\'\"\-\s/]+$", "", s).strip()
+        s = re.sub(r"\s+", " ", s)
+
+        full_ledger_name = f"{s} - {unit_str}" if unit_str else s
+        return (s, unit_str, full_ledger_name)
+
     @classmethod
     def _normalize_name(cls, name: str) -> str:
         if not name:
@@ -114,15 +305,23 @@ class SalesInvoiceUploadService:
                 if "INVOICE NO" in c_upper:
                     # Look in next cell or row below
                     if c_idx + 1 < len(row) and cls._clean_str(row[c_idx + 1]):
-                        invoice_no = cls._clean_str(row[c_idx + 1])
+                        cand = cls._clean_str(row[c_idx + 1])
+                        if not any(k in cand.upper() for k in ("INVOICE DATE", "DATE", "INVOICE NO")):
+                            invoice_no = cand
                     elif r_idx + 1 < len(rows) and cls._clean_str(rows[r_idx + 1][c_idx]):
-                        invoice_no = cls._clean_str(rows[r_idx + 1][c_idx])
+                        cand = cls._clean_str(rows[r_idx + 1][c_idx])
+                        if not any(k in cand.upper() for k in ("INVOICE DATE", "DATE", "INVOICE NO")):
+                            invoice_no = cand
 
                 if "INVOICE DATE" in c_upper:
                     if c_idx + 1 < len(row) and cls._clean_str(row[c_idx + 1]):
-                        invoice_date = cls._clean_str(row[c_idx + 1])
+                        cand = cls._clean_str(row[c_idx + 1])
+                        if not any(k in cand.upper() for k in ("INVOICE NO", "DATE:", "INVOICE DATE")):
+                            invoice_date = cand
                     elif r_idx + 1 < len(rows) and cls._clean_str(rows[r_idx + 1][c_idx]):
-                        invoice_date = cls._clean_str(rows[r_idx + 1][c_idx])
+                        cand = cls._clean_str(rows[r_idx + 1][c_idx])
+                        if not any(k in cand.upper() for k in ("INVOICE NO", "DATE:", "INVOICE DATE")):
+                            invoice_date = cand
 
             # 2. Items Header Detection: check if row has DESCRIPTION or PARTICULARS along with QTY, PRICE, RATE, or AMOUNT
             has_desc = any(t in row_str_upper for t in ("ITEM DESCRIPTION", "DESCRIPTION OF GOODS", "PARTICULARS", "DESCRIPTION"))
@@ -169,10 +368,23 @@ class SalesInvoiceUploadService:
                 if any(cls._clean_str(c).upper() in ("TOTAL", "SUB TOTAL", "SUBTOTAL") for c in row if c is not None):
                     total_row_idx = r_idx
 
+        fn_info = cls._extract_info_from_filename(filename)
+
         if not invoice_no and filename:
-            # Fallback invoice no from filename
-            clean_fname = re.sub(r"(?i)\.(xlsx?|xlsm)$", "", filename).strip()
-            invoice_no = clean_fname
+            # Fallback invoice no from filename, prioritizing structured invoice pattern
+            if fn_info.get("inv_no"):
+                invoice_no = fn_info["inv_no"]
+            else:
+                clean_fname = re.sub(r"(?i)\.(xlsx?|xlsm)$", "", filename).strip()
+                if fn_info.get("unit"):
+                    clean_fname = re.sub(re.escape(fn_info["unit"]), "", clean_fname, flags=re.IGNORECASE).strip()
+                    clean_fname = re.sub(r"[-_\s]+$", "", clean_fname).strip()
+                invoice_no = clean_fname
+        elif invoice_no and fn_info.get("inv_no"):
+            # If sheet only had '145' but filename had the full company prefix 'SCT-24-25-0145'
+            f_inv = fn_info["inv_no"].upper()
+            if f_inv.startswith("SCT") and (f_inv.endswith(invoice_no) or f_inv.endswith(invoice_no.zfill(4))):
+                invoice_no = fn_info["inv_no"]
 
         if not invoice_no or not client_name:
             return None
@@ -330,10 +542,18 @@ class SalesInvoiceUploadService:
                 except Exception:
                     pass
 
+        base_cust_name, detected_unit, full_ledger_name = cls._extract_unit_and_base_name(
+            client_name, client_address_lines, filename=filename
+        )
+
         return {
             "invoice_no": invoice_no,
             "invoice_date": inv_date_standard,
-            "customer_name": client_name,
+            "customer_name": full_ledger_name,
+            "base_customer_name": base_cust_name,
+            "detected_unit": detected_unit,
+            "raw_customer_name": client_name,
+            "address_lines": client_address_lines,
             "address1": client_address_lines[0] if client_address_lines else "",
             "address2": ", ".join(client_address_lines[1:]) if len(client_address_lines) > 1 else "",
             "city": city,
@@ -351,6 +571,8 @@ class SalesInvoiceUploadService:
             "net_amount": round(grand_total, 2),
             "items": items,
             "source_file": filename,
+            "file_invoice_no": fn_info.get("inv_no", ""),
+            "file_unit": fn_info.get("unit", ""),
         }
 
     @classmethod
@@ -381,6 +603,7 @@ class SalesInvoiceUploadService:
         if inv_col is None or cust_col is None:
             return []
 
+        fn_info = cls._extract_info_from_filename(filename)
         invoices_map: Dict[str, Dict[str, Any]] = {}
         for r_idx in range(1, len(rows)):
             row = rows[r_idx]
@@ -400,11 +623,19 @@ class SalesInvoiceUploadService:
             rate = cls._to_float(row[rate_col]) if rate_col is not None else 0.0
             amt = cls._to_float(row[amt_col]) if amt_col is not None else (qty * rate)
 
+            base_cust_name, detected_unit, full_ledger_name = cls._extract_unit_and_base_name(
+                cust_name, filename=filename
+            )
+
             if inv_no not in invoices_map:
                 invoices_map[inv_no] = {
                     "invoice_no": inv_no,
                     "invoice_date": inv_date,
-                    "customer_name": cust_name,
+                    "customer_name": full_ledger_name,
+                    "base_customer_name": base_cust_name,
+                    "detected_unit": detected_unit,
+                    "raw_customer_name": cust_name,
+                    "address_lines": [],
                     "address1": "",
                     "address2": "",
                     "city": "Coimbatore",
@@ -422,6 +653,8 @@ class SalesInvoiceUploadService:
                     "net_amount": 0.0,
                     "items": [],
                     "source_file": filename,
+                    "file_invoice_no": fn_info.get("inv_no", ""),
+                    "file_unit": fn_info.get("unit", ""),
                 }
 
             inv = invoices_map[inv_no]
@@ -500,8 +733,15 @@ class SalesInvoiceUploadService:
             SELECT 
                 LedgerCode,
                 LedgerName,
+                ChequePrintName,
+                CustomerUnit,
+                ParentLedgerCode,
                 GSTNo,
                 PanNo,
+                HouseNo,
+                Add1,
+                Add2,
+                Area,
                 City,
                 State,
                 ISNULL(OpeningBalance, 0) AS OpeningBalance
@@ -516,12 +756,31 @@ class SalesInvoiceUploadService:
         for l in db_ledgers:
             l_dict = dict(l)
             code = l_dict["LedgerCode"]
-            name = l_dict["LedgerName"].strip()
+            name = (l_dict["LedgerName"] or "").strip()
             clean_name = cls._clean_customer_name(name)
             gst = (l_dict["GSTNo"] or "").strip().upper()
 
+            has_explicit_unit = bool(l_dict.get("CustomerUnit") and str(l_dict["CustomerUnit"]).strip())
+            raw_db_unit = (l_dict.get("CustomerUnit") or "").strip()
+            if not raw_db_unit:
+                _, parsed_u, _ = cls._extract_unit_and_base_name(name, [l_dict.get("Add1"), l_dict.get("Add2"), l_dict.get("HouseNo")])
+                raw_db_unit = parsed_u
+            db_unit_str = cls._normalize_unit_str(raw_db_unit)
+            db_canon_token = cls._get_canonical_unit_token(db_unit_str)
+
+            db_base = cls._clean_customer_name(name)
+            if db_unit_str:
+                db_base = re.sub(r"[-–,/]?\s*" + re.escape(db_unit_str) + r"\b", "", db_base, flags=re.IGNORECASE).strip()
+            db_base_norm = cls._normalize_name(db_base)
+
             if gst and len(gst) == 15 and gst != "NA":
-                gst_to_ledger[gst] = l_dict
+                if not db_unit_str:
+                    if gst not in gst_to_ledger:
+                        gst_to_ledger[gst] = l_dict
+                else:
+                    if gst not in gst_to_ledger:
+                        gst_to_ledger[gst] = l_dict
+
             exact_name_to_ledger[clean_name.lower()] = l_dict
             exact_name_to_ledger[name.lower()] = l_dict
             all_db_ledgers.append({
@@ -529,9 +788,18 @@ class SalesInvoiceUploadService:
                 "name": clean_name,
                 "raw_name": name,
                 "norm_name": cls._normalize_name(name),
+                "base_name": db_base,
+                "base_norm": db_base_norm,
+                "unit_str": db_unit_str,
+                "canon_token": db_canon_token,
+                "has_explicit_unit": has_explicit_unit,
                 "gst": gst,
+                "city": (l_dict.get("City") or "").strip(),
                 "data": l_dict,
             })
+
+        # Prioritize ledgers with explicit CustomerUnit column set in DB
+        all_db_ledgers.sort(key=lambda x: (0 if x["has_explicit_unit"] else 1))
 
         # 2. Load Existing Invoices to Detect Duplicates
         existing_inv_nos = set(
@@ -575,10 +843,18 @@ class SalesInvoiceUploadService:
         # 4. Process Ledgers Map & Reconciliation
         unique_customers: Dict[str, Dict[str, Any]] = {}
         for inv in raw_invoices:
-            c_raw_name = inv["customer_name"].strip()
-            c_clean_name = cls._clean_customer_name(c_raw_name)
+            c_raw_name = inv.get("raw_customer_name") or inv["customer_name"]
+            c_base_name = inv.get("base_customer_name") or c_raw_name
+            c_unit = (inv.get("detected_unit") or "").strip()
+            c_full_name = inv.get("customer_name") or c_raw_name
             c_gst = inv["gst_no"].strip().upper()
-            lookup_key = c_gst if c_gst else c_clean_name.lower()
+            c_city = (inv.get("city") or "").strip().lower()
+
+            canon_token = cls._get_canonical_unit_token(c_unit)
+            norm_unit_val = cls._normalize_unit_str(c_unit)
+
+            # Construct composite key so multiple units sharing the same GST or name do NOT overwrite each other
+            lookup_key = cls._build_customer_lookup_key(c_gst, c_base_name, c_unit)
 
             if lookup_key not in unique_customers:
                 matched_ledger = None
@@ -586,53 +862,131 @@ class SalesInvoiceUploadService:
                 match_score = 0
                 suggested_code = ""
                 suggested_name = ""
+                parent_code = ""
+                parent_name = ""
 
-                # Tier 1: Exact GST Match
-                if c_gst and c_gst in gst_to_ledger:
-                    matched_ledger = gst_to_ledger[c_gst]
-                    match_type = "EXACT_GST"
-                    match_score = 100
-                    suggested_code = matched_ledger["LedgerCode"]
-                    suggested_name = matched_ledger["LedgerName"]
-                # Tier 2: Exact Name Match (clean or raw)
-                elif c_clean_name.lower() in exact_name_to_ledger:
-                    matched_ledger = exact_name_to_ledger[c_clean_name.lower()]
-                    match_type = "EXACT_NAME"
-                    match_score = 100
-                    suggested_code = matched_ledger["LedgerCode"]
-                    suggested_name = matched_ledger["LedgerName"]
-                elif c_raw_name.lower() in exact_name_to_ledger:
-                    matched_ledger = exact_name_to_ledger[c_raw_name.lower()]
-                    match_type = "EXACT_NAME"
-                    match_score = 100
-                    suggested_code = matched_ledger["LedgerCode"]
-                    suggested_name = matched_ledger["LedgerName"]
-                # Tier 3: Fuzzy Name Similarity Match
+                base_norm = cls._normalize_name(c_base_name)
+
+                if norm_unit_val:
+                    # Scenario A: Invoice belongs to a specific plant / factory unit
+                    # Tier 1: Exact GST + Unit Match
+                    if c_gst:
+                        for cand in all_db_ledgers:
+                            if cand["gst"] == c_gst and cls._unit_matches(canon_token, cand["canon_token"]):
+                                matched_ledger = cand["data"]
+                                match_type = "EXACT_UNIT_MATCH"
+                                match_score = 100
+                                suggested_code = matched_ledger["LedgerCode"]
+                                suggested_name = matched_ledger["LedgerName"]
+                                break
+
+                    # Tier 2: Base Company Name + Unit Match
+                    if not matched_ledger:
+                        for cand in all_db_ledgers:
+                            if (cand["base_norm"] == base_norm or base_norm in cand["base_norm"] or cand["base_norm"] in base_norm) and cls._unit_matches(canon_token, cand["canon_token"]):
+                                matched_ledger = cand["data"]
+                                match_type = "EXACT_UNIT_MATCH"
+                                match_score = 100
+                                suggested_code = matched_ledger["LedgerCode"]
+                                suggested_name = matched_ledger["LedgerName"]
+                                break
+
+                    # Tier 3: Full Name Match
+                    if not matched_ledger:
+                        if c_full_name.lower() in exact_name_to_ledger:
+                            matched_ledger = exact_name_to_ledger[c_full_name.lower()]
+                            match_type = "EXACT_UNIT_MATCH"
+                            match_score = 100
+                            suggested_code = matched_ledger["LedgerCode"]
+                            suggested_name = matched_ledger["LedgerName"]
+
+                    # Tier 4: GST + City Match (e.g. if unit was entered differently but city uniquely identifies it)
+                    if not matched_ledger and c_gst and c_city:
+                        for cand in all_db_ledgers:
+                            if cand["gst"] == c_gst and cand["city"] and c_city in cand["city"].lower():
+                                matched_ledger = cand["data"]
+                                match_type = "EXACT_UNIT_MATCH"
+                                match_score = 95
+                                suggested_code = matched_ledger["LedgerCode"]
+                                suggested_name = matched_ledger["LedgerName"]
+                                break
+
+                    if not matched_ledger:
+                        # Parent company exists in DB, but this Unit is NEW
+                        parent_ledger = None
+                        if c_gst and c_gst in gst_to_ledger:
+                            parent_ledger = gst_to_ledger[c_gst]
+                        elif c_base_name.lower() in exact_name_to_ledger:
+                            parent_ledger = exact_name_to_ledger[c_base_name.lower()]
+                        else:
+                            for cand in all_db_ledgers:
+                                if cand["base_norm"] == base_norm:
+                                    parent_ledger = cand["data"]
+                                    break
+
+                        if parent_ledger:
+                            match_type = "NEW_UNIT_LEDGER"
+                            match_score = 90
+                            parent_code = parent_ledger["LedgerCode"]
+                            parent_name = parent_ledger["LedgerName"]
+                            suggested_name = f"{parent_name} - {norm_unit_val}"
+                            suggested_code = ""
+                        else:
+                            # Brand new customer with unit
+                            match_type = "NEW_LEDGER"
+                            match_score = 0
+                            suggested_name = c_full_name
                 else:
-                    norm_excel_name = cls._normalize_name(c_clean_name)
-                    best_score = 0.0
-                    best_match = None
-                    for candidate in all_db_ledgers:
-                        ratio = difflib.SequenceMatcher(None, norm_excel_name, candidate["norm_name"]).ratio()
-                        if ratio > best_score:
-                            best_score = ratio
-                            best_match = candidate
-
-                    if best_match and best_score >= 0.70:
-                        matched_ledger = best_match["data"]
-                        match_type = "FUZZY_NAME"
-                        match_score = int(best_score * 100)
+                    # Scenario B: Standard customer WITHOUT units
+                    # Tier 1: Exact GST Match
+                    if c_gst and c_gst in gst_to_ledger:
+                        matched_ledger = gst_to_ledger[c_gst]
+                        match_type = "EXACT_GST"
+                        match_score = 100
                         suggested_code = matched_ledger["LedgerCode"]
                         suggested_name = matched_ledger["LedgerName"]
+                    # Tier 2: Exact Name Match
+                    elif cls._clean_customer_name(c_raw_name).lower() in exact_name_to_ledger:
+                        matched_ledger = exact_name_to_ledger[cls._clean_customer_name(c_raw_name).lower()]
+                        match_type = "EXACT_NAME"
+                        match_score = 100
+                        suggested_code = matched_ledger["LedgerCode"]
+                        suggested_name = matched_ledger["LedgerName"]
+                    elif c_raw_name.lower() in exact_name_to_ledger:
+                        matched_ledger = exact_name_to_ledger[c_raw_name.lower()]
+                        match_type = "EXACT_NAME"
+                        match_score = 100
+                        suggested_code = matched_ledger["LedgerCode"]
+                        suggested_name = matched_ledger["LedgerName"]
+                    # Tier 3: Fuzzy Name Similarity Match
+                    else:
+                        norm_excel_name = cls._normalize_name(c_raw_name)
+                        best_score = 0.0
+                        best_match = None
+                        for candidate in all_db_ledgers:
+                            ratio = difflib.SequenceMatcher(None, norm_excel_name, candidate["norm_name"]).ratio()
+                            if ratio > best_score:
+                                best_score = ratio
+                                best_match = candidate
 
-                is_matched = (match_score >= 80)
+                        if best_match and best_score >= 0.70:
+                            matched_ledger = best_match["data"]
+                            match_type = "FUZZY_NAME"
+                            match_score = int(best_score * 100)
+                            suggested_code = matched_ledger["LedgerCode"]
+                            suggested_name = matched_ledger["LedgerName"]
+
+                is_matched = bool(matched_ledger and match_score >= 80 and match_type != "NEW_UNIT_LEDGER")
                 assigned_preview_code = suggested_code if is_matched else f"CUS/{next_cust_seq:05d}"
                 if not is_matched:
                     next_cust_seq += 1
 
                 unique_customers[lookup_key] = {
                     "lookup_key": lookup_key,
-                    "customer_name": c_clean_name,
+                    "customer_name": c_full_name,
+                    "base_customer_name": c_base_name,
+                    "detected_unit": c_unit,
+                    "full_customer_name": c_full_name,
                     "excel_customer_name": c_raw_name,
                     "gst_no": c_gst,
                     "excel_gst": c_gst,
@@ -645,11 +999,13 @@ class SalesInvoiceUploadService:
                     "pincode": inv["pincode"],
                     "match_type": match_type,
                     "match_score": match_score,
+                    "parent_ledger_code": parent_code,
+                    "parent_ledger_name": parent_name,
                     "exists_in_db": is_matched,
                     "is_create_new": not is_matched,
                     "action": "MAP_EXISTING" if is_matched else "CREATE_NEW",
                     "suggested_ledger_code": suggested_code,
-                    "suggested_ledger_name": suggested_name,
+                    "suggested_ledger_name": suggested_name or c_full_name,
                     "matched_ledger_code": suggested_code if is_matched else "",
                     "selected_ledger_code": suggested_code if is_matched else "",
                     "assigned_code": assigned_preview_code,
@@ -662,20 +1018,28 @@ class SalesInvoiceUploadService:
 
         for inv_idx, inv in enumerate(raw_invoices):
             inv_no = inv["invoice_no"]
-            c_name = cls._clean_customer_name(inv["customer_name"])
+            c_name = inv["customer_name"]
+            c_unit = (inv.get("detected_unit") or "").strip()
+            c_base = inv.get("base_customer_name") or c_name
             c_gst = inv["gst_no"].strip().upper()
-            lookup_key = c_gst if c_gst else c_name.lower()
+
+            lookup_key = cls._build_customer_lookup_key(c_gst, c_base, c_unit)
+
             cust_rec = unique_customers.get(lookup_key, {})
 
             is_duplicate = inv_no in existing_inv_nos
             invoice_status = "Duplicate in DB (Blocked)" if is_duplicate else ("Ready" if cust_rec.get("selected_ledger_code") or cust_rec.get("is_create_new") else "Action Required")
-            linked_code = cust_rec.get("selected_ledger_code") or cust_rec.get("matched_ledger_code") or cust_rec.get("assigned_code") or "Unmapped"
+            linked_code = cust_rec.get("selected_ledger_code") or cust_rec.get("matched_ledger_code") or (f"New ({cust_rec.get('city')})" if cust_rec.get("is_create_new") else "Unmapped")
 
             invoices_table.append({
                 "id": inv_idx + 1,
                 "invoice_no": inv_no,
+                "lookup_key": lookup_key,
                 "invoice_date": inv["invoice_date"],
                 "customer_name": c_name,
+                "base_customer_name": c_base,
+                "detected_unit": c_unit,
+                "raw_customer_name": inv.get("raw_customer_name") or c_name,
                 "gst_no": c_gst,
                 "total_qty": inv["total_qty"],
                 "total_item_amount": inv["total_item_amount"],
@@ -840,15 +1204,21 @@ class SalesInvoiceUploadService:
                 if selected_code and not is_create_new:
                     if lookup_key:
                         ledger_code_map[lookup_key] = selected_code
+                    full_name = led.get("full_customer_name") or led.get("customer_name")
+                    if full_name:
+                        ledger_code_map[full_name.lower()] = selected_code
                     clean_n = cls._clean_customer_name(led.get("customer_name") or led.get("excel_customer_name"))
                     if clean_n:
                         ledger_code_map[clean_n.lower()] = selected_code
-                    gst_val = (led.get("gst_no") or led.get("excel_gst") or "").strip().upper()
-                    if gst_val:
-                        ledger_code_map[gst_val] = selected_code
+                    if not led.get("detected_unit"):
+                        gst_val = (led.get("gst_no") or led.get("excel_gst") or "").strip().upper()
+                        if gst_val:
+                            ledger_code_map[gst_val] = selected_code
                 elif is_create_new:
                     new_code = cls._generate_next_ledger_code(db)
-                    cust_name = cls._clean_customer_name(led.get("customer_name") or led.get("excel_customer_name") or "New Customer")
+                    full_ledger_name = led.get("full_customer_name") or led.get("customer_name") or led.get("excel_customer_name") or "New Customer"
+                    base_name = led.get("base_customer_name") or cls._extract_unit_and_base_name(full_ledger_name)[0] or full_ledger_name
+                    detected_unit = (led.get("detected_unit") or "").strip()
                     gst_no = (led.get("gst_no") or led.get("excel_gst") or "").strip().upper()
                     pan_no = led.get("pan_no") or led.get("excel_pan") or (gst_no[2:12] if len(gst_no) == 15 else "")
 
@@ -856,23 +1226,28 @@ class SalesInvoiceUploadService:
                         INSERT INTO dbo.Acc_Mst_Ledger (
                             Ccode, Lcode, LedgerCode, LedgerGrpId, LedgerGrpName,
                             LedgerCategory, AccountType, LedgerType, LedgerName,
-                            ChequePrintName, Add1, Add2, City, PinCode, State, Country,
+                            ChequePrintName, CustomerUnit, ParentLedgerCode,
+                            Add1, Add2, City, PinCode, State, Country,
                             GSTNo, PanNo, Status, IsActive, Approval_Status,
                             OpeningBalance, BalanceType, UserID, UserName, CreateOn
                         ) VALUES (
                             :ccode, :lcode, :code, '1', 'Customer',
                             'Sundry Debtors', 'Domestic Customer', 'Customer', :name,
-                            :cheque_name, :add1, :add2, :city, :pin, :state, 'India',
+                            :cheque_name, :customer_unit, :parent_ledger_code,
+                            :add1, :add2, :city, :pin, :state, 'India',
                             :gst, :pan, 'Active', 'Yes', '1',
                             0.00, 'Dr', :user, :user, :now
                         )
                     """
+                    clean_unit_val = detected_unit.upper() if (detected_unit and detected_unit.upper() not in ("UNIT", "UNIT-", "UNIT -")) else None
                     db.execute(text(insert_ledger_sql), {
                         "ccode": c_code,
                         "lcode": l_code,
                         "code": new_code,
-                        "name": cust_name,
-                        "cheque_name": cust_name,
+                        "name": full_ledger_name,
+                        "cheque_name": base_name,
+                        "customer_unit": clean_unit_val,
+                        "parent_ledger_code": led.get("parent_ledger_code") or None,
                         "add1": (led.get("address1") or "")[:750],
                         "add2": (led.get("address2") or "")[:750],
                         "city": (led.get("city") or "Coimbatore")[:750],
@@ -885,10 +1260,13 @@ class SalesInvoiceUploadService:
                     })
                     if lookup_key:
                         ledger_code_map[lookup_key] = new_code
-                    if cust_name:
-                        ledger_code_map[cust_name.lower()] = new_code
-                    if gst_no:
-                        ledger_code_map[gst_no] = new_code
+                    if full_ledger_name:
+                        ledger_code_map[full_ledger_name.lower()] = new_code
+                    if not detected_unit:
+                        if base_name:
+                            ledger_code_map[base_name.lower()] = new_code
+                        if gst_no:
+                            ledger_code_map[gst_no] = new_code
                     created_ledgers_count += 1
 
             # 2. Process Items in Mst_Item if auto_create_items is checked
@@ -925,15 +1303,24 @@ class SalesInvoiceUploadService:
             for inv in invoices:
                 inv_no = inv.get("invoice_no")
                 inv_date = inv.get("invoice_date", date.today().isoformat())
-                c_name = cls._clean_customer_name(inv.get("customer_name"))
+                c_name = inv.get("customer_name") or cls._clean_customer_name(inv.get("raw_customer_name", ""))
                 c_gst = inv.get("gst_no", "").strip().upper()
-                lookup_key = c_gst if c_gst else c_name.lower()
-                final_cust_code = (
-                    ledger_code_map.get(lookup_key)
-                    or (ledger_code_map.get(c_gst) if c_gst else None)
-                    or ledger_code_map.get(c_name.lower())
-                    or "CUS/00001"
-                )
+                c_unit = (inv.get("detected_unit") or "").strip()
+                c_base = inv.get("base_customer_name") or c_name
+
+                lookup_key = cls._build_customer_lookup_key(c_gst, c_base, c_unit)
+
+                cand_code = inv.get("linked_ledger_code") or ""
+                if cand_code and not cand_code.startswith("New ") and cand_code != "Unmapped":
+                    final_cust_code = cand_code
+                else:
+                    final_cust_code = (
+                        ledger_code_map.get(lookup_key)
+                        or ledger_code_map.get(c_name.lower())
+                        or (ledger_code_map.get(c_gst) if (not c_unit and c_gst) else None)
+                        or (ledger_code_map.get(c_base.lower()) if (not c_unit and c_base) else None)
+                        or "CUS/00001"
+                    )
 
                 # Compute Financial Year from TransDate
                 dt = datetime.strptime(inv_date[:10], "%Y-%m-%d") if "-" in inv_date else datetime.now()
@@ -952,17 +1339,19 @@ class SalesInvoiceUploadService:
                     skipped_duplicates.append(inv_no)
                     continue
 
+                clean_inv_unit = c_unit.upper() if (c_unit and c_unit.upper() not in ("UNIT", "UNIT-", "UNIT -")) else None
+
                 # Header Insert
                 db.execute(text("""
                     INSERT INTO dbo.Acc_Sales_Inv_Main (
                         Ccode, Lcode, FinYearCode, FinYearVal, TransNo, TransDate,
-                        InvoiceNo, InvoiceDate, CustomerCode, CustomerName, GST,
+                        InvoiceNo, InvoiceDate, CustomerCode, CustomerName, CustomerUnit, GST,
                         TotalQty, TotalItemAmount, TotalCGSTAmount, TotalSGSTAmount,
                         TotalIGSTAmount, TotalAmount, RoundType, RoundOff, NetAmount,
                         Approval_Status, Status, UserName, UserCode, CreateOn
                     ) VALUES (
                         :ccode, :lcode, :fy_code, :fy_val, :trans_no, :trans_date,
-                        :inv_no, :inv_date, :cust_code, :cust_name, :gst,
+                        :inv_no, :inv_date, :cust_code, :cust_name, :customer_unit, :gst,
                         :qty, :item_amt, :cgst, :sgst,
                         :igst, :tot_amt, 0, :round_off, :net_amt,
                         'Approved', 'Active', :user, :user, :now
@@ -978,6 +1367,7 @@ class SalesInvoiceUploadService:
                     "inv_date": inv_date,
                     "cust_code": final_cust_code,
                     "cust_name": c_name,
+                    "customer_unit": clean_inv_unit,
                     "gst": c_gst,
                     "qty": inv.get("total_qty", 1.0),
                     "item_amt": inv.get("total_item_amount", 0.0),
@@ -1015,13 +1405,13 @@ class SalesInvoiceUploadService:
                     db.execute(text("""
                         INSERT INTO dbo.Acc_Sales_Inv_Sub (
                             Ccode, Lcode, FinYearCode, FinYearVal, TransNo, TransDate,
-                            InvoiceNo, InvoiceDate, CustomerCode, CustomerName,
+                            InvoiceNo, InvoiceDate, CustomerCode, CustomerName, CustomerUnit,
                             ItemCode, ProductType, HSNCode, Qty, Rate, ItemValue,
                             SerialNo, GST, CGST, SGST, IGST, NetAmount, Status,
                             UserName, Usercode, CreateOn
                         ) VALUES (
                             :ccode, :lcode, :fy_code, :fy_val, :trans_no, :trans_date,
-                            :inv_no, :inv_date, :cust_code, :cust_name,
+                            :inv_no, :inv_date, :cust_code, :cust_name, :customer_unit,
                             :item_code, :prod_type, :hsn, :qty, :rate, :val,
                             '-', :gst_pct, :cgst, :sgst, :igst, :net_amt, 'Active',
                             :user, :user, :now
@@ -1037,6 +1427,7 @@ class SalesInvoiceUploadService:
                         "inv_date": inv_date,
                         "cust_code": final_cust_code,
                         "cust_name": c_name,
+                        "customer_unit": clean_inv_unit,
                         "item_code": resolved_item_code,
                         "prod_type": desc,
                         "hsn": hsn,

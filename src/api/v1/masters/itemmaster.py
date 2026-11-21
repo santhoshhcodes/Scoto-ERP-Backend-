@@ -38,7 +38,7 @@ def create_item(
     )
 
 
-@router.put("/{item_code}")
+@router.put("/{item_code:path}")
 def update_item(
     item_code: str,
     payload: ItemUpdate,
@@ -51,7 +51,7 @@ def update_item(
     )
 
 
-@router.delete("/{item_code}")
+@router.delete("/{item_code:path}")
 def delete_item(
     item_code: str,
     db: Session = Depends(get_mssql_session("db2")),

@@ -1,5 +1,6 @@
 from datetime import datetime
 from decimal import Decimal
+from urllib.parse import unquote
 from fastapi import HTTPException
 from sqlalchemy import text
 from sqlalchemy.orm import Session
@@ -156,7 +157,9 @@ def get_ledgers(
             '' AS MSME_No,
             '30' AS PaymentDays,
             COALESCE(OpeningBalance, 0) AS OpeningBalance,
-            COALESCE(BalanceType, 'Dr') AS BalanceType
+            COALESCE(BalanceType, 'Dr') AS BalanceType,
+            '' AS CustomerUnit,
+            '' AS ParentLedgerCode
         FROM dbo.Acc_Mst_GeneralLedger
         WHERE Status <> 'Delete'
 
@@ -205,7 +208,9 @@ def get_ledgers(
             MSME_No,
             PaymentDays,
             COALESCE(OpeningBalance, 0) AS OpeningBalance,
-            COALESCE(BalanceType, 'Cr') AS BalanceType
+            COALESCE(BalanceType, 'Cr') AS BalanceType,
+            CustomerUnit,
+            ParentLedgerCode
         FROM dbo.Acc_Mst_Ledger
         WHERE Status <> 'Delete'
     """
@@ -262,15 +267,56 @@ def get_account_headers(db: Session):
     }
 
 
-def create_ledger(db: Session, payload: LedgerCreate):
-    ledger_code = payload.LedgerCode.strip()
-    ledger_name = payload.LedgerName.strip()
+def get_next_ledger_code(db: Session, ledger_type: str) -> str:
+    """
+    Generates next sequential official ERP code:
+      - Customer: CUS/00001, CUS/00029, etc.
+      - Supplier: SUP/00001, SUP/00006, etc.
+      - General Ledger: GL/00001, GL/00763, etc.
+    """
+    l_type = (ledger_type or "").strip().lower()
+    is_customer = l_type == "customer"
+    is_gl = l_type == "general ledger"
 
-    if not ledger_code or not ledger_name:
+    if is_gl:
+        row = db.execute(text("""
+            SELECT MAX(TRY_CAST(SUBSTRING(AccGenLdgCode, 4, 10) AS INT))
+            FROM dbo.Acc_Mst_GeneralLedger
+            WHERE AccGenLdgCode LIKE 'GL/%'
+        """)).scalar()
+        max_seq = row or 0
+        return f"GL/{max_seq + 1:05d}"
+    elif is_customer:
+        row = db.execute(text("""
+            SELECT MAX(TRY_CAST(SUBSTRING(LedgerCode, 5, 10) AS INT))
+            FROM dbo.Acc_Mst_Ledger
+            WHERE LedgerCode LIKE 'CUS/%'
+        """)).scalar()
+        max_seq = row or 0
+        return f"CUS/{max_seq + 1:05d}"
+    else:
+        row = db.execute(text("""
+            SELECT MAX(TRY_CAST(SUBSTRING(LedgerCode, 5, 10) AS INT))
+            FROM dbo.Acc_Mst_Ledger
+            WHERE LedgerCode LIKE 'SUP/%'
+        """)).scalar()
+        max_seq = row or 0
+        return f"SUP/{max_seq + 1:05d}"
+
+
+def create_ledger(db: Session, payload: LedgerCreate):
+    ledger_code = (payload.LedgerCode or "").strip()
+    ledger_name = (payload.LedgerName or "").strip()
+
+    if not ledger_name:
         raise HTTPException(
             status_code=422,
-            detail="Ledger code and ledger name are required",
+            detail="Ledger name is required",
         )
+
+    # Auto-generate next sequential code if missing or dummy format (CUS-xxxx, SUP-xxxx, GL-xxxx)
+    if not ledger_code or any(ledger_code.upper().startswith(p) for p in ("CUS-", "SUP-", "GL-", "AUTO")):
+        ledger_code = get_next_ledger_code(db, payload.LedgerType)
 
     if payload.LedgerType == "General Ledger":
         duplicate_sql = """
@@ -361,11 +407,24 @@ def create_ledger(db: Session, payload: LedgerCreate):
             supply_for = "Customer" if is_customer else (getattr(payload, "SupplyFor", None) or "Goods")
             ledger_type = "Customer" if is_customer else "Supplier"
 
+            # Multi-unit parsing
+            raw_unit = (getattr(payload, "CustomerUnit", None) or "").strip().upper()
+            clean_unit = None
+            if raw_unit and raw_unit not in ("UNIT", "UNIT-", "UNIT -", "NONE", "NULL"):
+                if not (raw_unit.startswith("UNIT ") or raw_unit.startswith("PLANT ") or raw_unit.startswith("SITE ")):
+                    clean_unit = f"UNIT {raw_unit}"
+                else:
+                    clean_unit = raw_unit
+            parent_ledger_code = getattr(payload, "ParentLedgerCode", None) or None
+            if parent_ledger_code:
+                parent_ledger_code = parent_ledger_code.strip() or None
+
             insert_sql = """
                 INSERT INTO dbo.Acc_Mst_Ledger (
                     Ccode, Lcode, LedgerCode,
                     LedgerGrpId, LedgerGrpName, LedgerCategory,
                     Region, SupplyFor, LedgerName, ChequePrintName,
+                    CustomerUnit, ParentLedgerCode,
                     Ledger_Class, HouseNo, Add1, Add2, Area, City,
                     PinCode, State, Country, MobileNo, TelNo,
                     ContectName, ContectNo, MailID, WebSite,
@@ -385,6 +444,7 @@ def create_ledger(db: Session, payload: LedgerCreate):
                     'SCT', 'UNIT I', :ledger_code,
                     :grp_id, :grp_name, :category,
                     :region, :supply_for, :ledger_name, :cheque_print_name,
+                    :customer_unit, :parent_ledger_code,
                     :ledger_class, :house_no, :add1, :add2, :area, :city,
                     :pincode, :state, :country, :mobile_no, :tel_no,
                     :contect_name, :contect_no, :mail_id, :website,
@@ -413,6 +473,8 @@ def create_ledger(db: Session, payload: LedgerCreate):
                     "region": payload.Region or "Domestic",
                     "ledger_name": ledger_name,
                     "cheque_print_name": payload.ChequePrintName or ledger_name,
+                    "customer_unit": clean_unit,
+                    "parent_ledger_code": parent_ledger_code,
                     "ledger_class": payload.Ledger_Class or "Pvt Company",
                     "house_no": payload.HouseNo or "",
                     "add1": payload.Add1 or "",
@@ -483,12 +545,14 @@ def update_ledger(
     ledger_code: str,
     payload: LedgerUpdate,
 ):
+    ledger_code = unquote(str(ledger_code or "")).strip()
+
     # Check if Party Ledger or General Ledger
     party_existing = db.execute(
         text("""
             SELECT TOP 1 LedgerCode, LedgerName, OpeningBalance, BalanceType
             FROM dbo.Acc_Mst_Ledger
-            WHERE LedgerCode = :code
+            WHERE (LedgerCode = :code OR LOWER(LTRIM(RTRIM(LedgerCode))) = LOWER(:code))
               AND Status <> 'Delete'
         """),
         {"code": ledger_code},
@@ -500,7 +564,7 @@ def update_ledger(
             text("""
                 SELECT TOP 1 AccGenLdgCode, AccGenLdgName, OpeningBalance, BalanceType
                 FROM dbo.Acc_Mst_GeneralLedger
-                WHERE AccGenLdgCode = :code
+                WHERE (AccGenLdgCode = :code OR LOWER(LTRIM(RTRIM(AccGenLdgCode))) = LOWER(:code))
                   AND Status <> 'Delete'
             """),
             {"code": ledger_code},
@@ -525,6 +589,25 @@ def update_ledger(
 
     try:
         if party_existing:
+            clean_unit = None
+            update_unit = 0
+            if getattr(payload, "CustomerUnit", None) is not None:
+                update_unit = 1
+                raw_u = str(payload.CustomerUnit).strip().upper()
+                if raw_u and raw_u not in ("UNIT", "UNIT-", "UNIT -", "NONE", "NULL"):
+                    if not (raw_u.startswith("UNIT ") or raw_u.startswith("PLANT ") or raw_u.startswith("SITE ")):
+                        clean_unit = f"UNIT {raw_u}"
+                    else:
+                        clean_unit = raw_u
+                else:
+                    clean_unit = None
+
+            clean_parent = None
+            update_parent = 0
+            if getattr(payload, "ParentLedgerCode", None) is not None:
+                update_parent = 1
+                clean_parent = str(payload.ParentLedgerCode).strip() or None
+
             update_sql = """
                 UPDATE dbo.Acc_Mst_Ledger
                 SET
@@ -566,7 +649,9 @@ def update_ledger(
                     PaymentDays = COALESCE(:payment_days, PaymentDays),
                     OpeningBalance = COALESCE(:opening_bal, OpeningBalance),
                     BalanceType = COALESCE(:balance_type, BalanceType),
-                    LedgerType = COALESCE(:ledger_type, LedgerType)
+                    LedgerType = COALESCE(:ledger_type, LedgerType),
+                    CustomerUnit = CASE WHEN :update_unit = 1 THEN :customer_unit ELSE CustomerUnit END,
+                    ParentLedgerCode = CASE WHEN :update_parent = 1 THEN :parent_ledger_code ELSE ParentLedgerCode END
                 WHERE LedgerCode = :ledger_code
                   AND Status <> 'Delete'
             """
@@ -614,6 +699,10 @@ def update_ledger(
                     "opening_bal": opening_bal,
                     "balance_type": payload.BalanceType,
                     "ledger_type": payload.LedgerType,
+                    "update_unit": update_unit,
+                    "customer_unit": clean_unit,
+                    "update_parent": update_parent,
+                    "parent_ledger_code": clean_parent,
                 },
             )
 
@@ -671,12 +760,13 @@ def update_ledger(
 
 
 def delete_ledger(db: Session, ledger_code: str):
+    ledger_code = unquote(str(ledger_code or "")).strip()
     try:
         party_result = db.execute(
             text("""
                 UPDATE dbo.Acc_Mst_Ledger
                 SET Status = 'Delete'
-                WHERE LedgerCode = :code
+                WHERE (LedgerCode = :code OR LOWER(LTRIM(RTRIM(LedgerCode))) = LOWER(:code))
                   AND Status <> 'Delete'
             """),
             {"code": ledger_code},
@@ -686,7 +776,7 @@ def delete_ledger(db: Session, ledger_code: str):
             text("""
                 UPDATE dbo.Acc_Mst_GeneralLedger
                 SET Status = 'Delete'
-                WHERE AccGenLdgCode = :code
+                WHERE (AccGenLdgCode = :code OR LOWER(LTRIM(RTRIM(AccGenLdgCode))) = LOWER(:code))
                   AND Status <> 'Delete'
             """),
             {"code": ledger_code},

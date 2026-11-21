@@ -45,20 +45,35 @@ class AttendanceService:
 
     @staticmethod
     def _employee_rows(db2: Session, employee_code: Optional[str] = None) -> list:
-        sql = """
-            SELECT EmployeeCode, FirstName, MiddleName, LastName,
-                   DisplayName, ESSLEmployeeCode, EmployeeSource,
-                   CompanyCode, LocationCode, IsActive, IsOnSite,
-                   ShiftEndTime, ShiftStartTime
-            FROM dbo.Employee_Mst
-            WHERE IsActive = 1
-              AND (:employee_code IS NULL OR EmployeeCode = :employee_code)
-            ORDER BY EmployeeCode
-        """
-        rows = db2.execute(
-            text(sql),
-            {"employee_code": employee_code},
-        ).mappings().all()
+        try:
+            sql = """
+                SELECT EmployeeCode, FirstName, MiddleName, LastName,
+                       DisplayName, ESSLEmployeeCode, EmployeeSource,
+                       CompanyCode, LocationCode, IsActive, IsOnSite,
+                       ShiftEndTime, ShiftStartTime
+                FROM dbo.Employee_Mst
+                WHERE IsActive = 1
+                  AND (:employee_code IS NULL OR EmployeeCode = :employee_code)
+                ORDER BY EmployeeCode
+            """
+            rows = db2.execute(
+                text(sql),
+                {"employee_code": employee_code},
+            ).mappings().all()
+        except Exception:
+            sql_fallback = """
+                SELECT EmployeeCode, FirstName, MiddleName, LastName,
+                       DisplayName, ESSLEmployeeCode, EmployeeSource,
+                       CompanyCode, LocationCode, IsActive, IsOnSite
+                FROM dbo.Employee_Mst
+                WHERE IsActive = 1
+                  AND (:employee_code IS NULL OR EmployeeCode = :employee_code)
+                ORDER BY EmployeeCode
+            """
+            rows = db2.execute(
+                text(sql_fallback),
+                {"employee_code": employee_code},
+            ).mappings().all()
 
         employees = []
         for row in rows:
@@ -244,15 +259,27 @@ class AttendanceService:
             emp_leaves.setdefault(str(l["EmployeeCode"]).strip(), []).append(dict(l))
 
         # 3. Daily Reviews / Adjustments (LOP, Casual Leave, Comp Off, Half Day, On Duty, etc.)
-        review_rows = db2.execute(
-            text("""
-                SELECT EmployeeCode, AttendanceDate, ReviewStatus, ReviewCategory, ReviewReason,
-                       CorrectedCheckIn, CorrectedCheckOut, ClientCode, ClientName, PlaceOfVisit
-                FROM dbo.Attendance_Daily_Review
-                WHERE AttendanceDate >= :start_date AND AttendanceDate <= :end_date
-            """),
-            {"start_date": start_date_obj, "end_date": end_date_obj},
-        ).mappings().all()
+        try:
+            review_rows = db2.execute(
+                text("""
+                    SELECT EmployeeCode, AttendanceDate, ReviewStatus, ReviewCategory, ReviewReason,
+                           CorrectedCheckIn, CorrectedCheckOut, ClientCode, ClientName, PlaceOfVisit
+                    FROM dbo.Attendance_Daily_Review
+                    WHERE AttendanceDate >= :start_date AND AttendanceDate <= :end_date
+                """),
+                {"start_date": start_date_obj, "end_date": end_date_obj},
+            ).mappings().all()
+        except Exception:
+            # Resilient fallback if Migration 05 columns (ClientCode, ClientName, PlaceOfVisit) are not yet added
+            review_rows = db2.execute(
+                text("""
+                    SELECT EmployeeCode, AttendanceDate, ReviewStatus, ReviewCategory, ReviewReason,
+                           CorrectedCheckIn, CorrectedCheckOut
+                    FROM dbo.Attendance_Daily_Review
+                    WHERE AttendanceDate >= :start_date AND AttendanceDate <= :end_date
+                """),
+                {"start_date": start_date_obj, "end_date": end_date_obj},
+            ).mappings().all()
 
         emp_reviews = {}
         for rev in review_rows:
@@ -314,16 +341,30 @@ class AttendanceService:
             pass
 
         # 6. Late & Early Fines (Waived, Confirmed, Pending)
-        fine_rows = db2.execute(
-            text("""
-                SELECT EmployeeCode, AttendanceDate, LateMinutes, PermissionMinutesApplied,
-                       ActualCheckOut, ShiftEndTime, EarlyExitMinutes, EarlyPermissionMinutes, FineType,
-                       FineAmount, FineStatus
-                FROM dbo.Attendance_Late_Fine
-                WHERE AttendanceDate >= :start_date AND AttendanceDate <= :end_date
-            """),
-            {"start_date": start_date_obj, "end_date": end_date_obj},
-        ).mappings().all()
+        try:
+            fine_rows = db2.execute(
+                text("""
+                    SELECT EmployeeCode, AttendanceDate, LateMinutes, PermissionMinutesApplied,
+                           ActualCheckOut, ShiftEndTime, EarlyExitMinutes, EarlyPermissionMinutes, FineType,
+                           FineAmount, FineStatus
+                    FROM dbo.Attendance_Late_Fine
+                    WHERE AttendanceDate >= :start_date AND AttendanceDate <= :end_date
+                """),
+                {"start_date": start_date_obj, "end_date": end_date_obj},
+            ).mappings().all()
+        except Exception:
+            try:
+                fine_rows = db2.execute(
+                    text("""
+                        SELECT EmployeeCode, AttendanceDate, LateMinutes, PermissionMinutesApplied,
+                               FineAmount, FineStatus
+                        FROM dbo.Attendance_Late_Fine
+                        WHERE AttendanceDate >= :start_date AND AttendanceDate <= :end_date
+                    """),
+                    {"start_date": start_date_obj, "end_date": end_date_obj},
+                ).mappings().all()
+            except Exception:
+                fine_rows = []
         emp_fines = {
             (str(row["EmployeeCode"]).strip(), row["AttendanceDate"]): dict(row)
             for row in fine_rows
@@ -828,26 +869,41 @@ class AttendanceService:
         for row in leave_rows:
             leaves.setdefault(row["EmployeeCode"], dict(row))
 
-        review_rows = db2.execute(
-            text("""
-                SELECT EmployeeCode, ReviewStatus, ReviewReason,
-                       CorrectedCheckIn, CorrectedCheckOut, ClientCode, ClientName, PlaceOfVisit
-                FROM dbo.Attendance_Daily_Review
-                WHERE AttendanceDate = :target_date
-            """),
-            {"target_date": target_date},
-        ).mappings().all()
+        try:
+            review_rows = db2.execute(
+                text("""
+                    SELECT EmployeeCode, ReviewStatus, ReviewReason,
+                           CorrectedCheckIn, CorrectedCheckOut, ClientCode, ClientName, PlaceOfVisit
+                    FROM dbo.Attendance_Daily_Review
+                    WHERE AttendanceDate = :target_date
+                """),
+                {"target_date": target_date},
+            ).mappings().all()
+        except Exception:
+            # Resilient fallback if Migration 05 columns are not yet added
+            review_rows = db2.execute(
+                text("""
+                    SELECT EmployeeCode, ReviewStatus, ReviewReason,
+                           CorrectedCheckIn, CorrectedCheckOut
+                    FROM dbo.Attendance_Daily_Review
+                    WHERE AttendanceDate = :target_date
+                """),
+                {"target_date": target_date},
+            ).mappings().all()
         reviews = {row["EmployeeCode"]: dict(row) for row in review_rows}
 
-        fine_rows = db2.execute(
-            text("""
-                SELECT EmployeeCode, FineAmount, FineStatus, PermissionMinutesApplied, LateMinutes,
-                       ActualCheckOut, ShiftEndTime, EarlyExitMinutes, EarlyPermissionMinutes, FineType
-                FROM dbo.Attendance_Late_Fine
-                WHERE AttendanceDate = :target_date
-            """),
-            {"target_date": target_date},
-        ).mappings().all()
+        try:
+            fine_rows = db2.execute(
+                text("""
+                    SELECT EmployeeCode, FineAmount, FineStatus, PermissionMinutesApplied, LateMinutes,
+                           ActualCheckOut, ShiftEndTime, EarlyExitMinutes, EarlyPermissionMinutes, FineType
+                    FROM dbo.Attendance_Late_Fine
+                    WHERE AttendanceDate = :target_date
+                """),
+                {"target_date": target_date},
+            ).mappings().all()
+        except Exception:
+            fine_rows = []
         fines = {row["EmployeeCode"]: dict(row) for row in fine_rows}
 
         # Check if target_date is a Holiday in dbo.Attendance_Holiday

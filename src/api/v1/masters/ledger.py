@@ -27,6 +27,19 @@ def read_ledgers(
     )
 
 
+@router.get("/next-code")
+def read_next_ledger_code(
+    ledger_type: str = Query(default="Customer"),
+    db: Session = Depends(get_mssql_session("db2")),
+):
+    next_code = ledger_services.get_next_ledger_code(db=db, ledger_type=ledger_type)
+    return {
+        "success": True,
+        "ledger_type": ledger_type,
+        "next_code": next_code,
+    }
+
+
 @router.get("/headers")
 def read_account_headers(
     db: Session = Depends(get_mssql_session("db2")),

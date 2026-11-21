@@ -392,11 +392,25 @@ class DeviceService:
                 if not user_id:
                     continue
 
-                try:
-                    log_dt = datetime.strptime(
-                        item["LogDate"], "%Y-%m-%d %H:%M:%S"
-                    )
-                except (ValueError, KeyError, TypeError):
+                raw_log_date = str(item.get("LogDate", "")).strip()
+                log_dt = None
+                for fmt in (
+                    "%Y-%m-%d %H:%M:%S",
+                    "%Y-%m-%d %H.%M.%S",
+                    "%Y/%m/%d %H:%M:%S",
+                    "%Y/%m/%d %H.%M.%S",
+                    "%d/%m/%Y %H:%M:%S",
+                    "%d/%m/%Y %H.%M.%S",
+                    "%d-%m-%Y %H:%M:%S",
+                    "%d-%m-%Y %H.%M.%S",
+                ):
+                    try:
+                        log_dt = datetime.strptime(raw_log_date, fmt)
+                        break
+                    except ValueError:
+                        pass
+
+                if not log_dt:
                     logger.warning("Skipping invalid ESSL log: %s", item)
                     continue
 

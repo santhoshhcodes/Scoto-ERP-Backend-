@@ -49,6 +49,8 @@ class CustomerReportService:
             SELECT TOP (:limit)
                 LedgerCode,
                 LedgerName,
+                CustomerUnit,
+                ParentLedgerCode,
                 ChequePrintName,
                 AccountType AS AccLedgerHeaderName,
                 LedgerGrpName,
@@ -71,6 +73,8 @@ class CustomerReportService:
                 SELECT
                     LedgerCode,
                     LedgerName,
+                    ISNULL(CustomerUnit, '') AS CustomerUnit,
+                    ISNULL(ParentLedgerCode, '') AS ParentLedgerCode,
                     ChequePrintName,
                     AccountType,
                     LedgerGrpName,
@@ -97,6 +101,8 @@ class CustomerReportService:
                 SELECT DISTINCT
                     COALESCE(NULLIF(CustomerCode, ''), 'CUS-' + CONVERT(VARCHAR(20), ABS(CHECKSUM(CustomerName)) % 10000)) AS LedgerCode,
                     CustomerName AS LedgerName,
+                    ISNULL(CustomerUnit, '') AS CustomerUnit,
+                    '' AS ParentLedgerCode,
                     CustomerName AS ChequePrintName,
                     'Domestic Customer' AS AccountType,
                     'Customer' AS LedgerGrpName,
@@ -129,6 +135,7 @@ class CustomerReportService:
                 AND (
                     LedgerCode LIKE :term
                     OR LedgerName LIKE :term
+                    OR CustomerUnit LIKE :term
                     OR GSTNo LIKE :term
                     OR City LIKE :term
                     OR MobileNo LIKE :term
@@ -139,7 +146,22 @@ class CustomerReportService:
         sql += " ORDER BY LedgerName ASC"
 
         rows = db.execute(text(sql), params).mappings().all()
-        return [dict(r) for r in rows]
+        out = []
+        for r in rows:
+            d = dict(r)
+            u = (d.get("CustomerUnit") or "").strip()
+            c_name = (d.get("LedgerName") or "").strip()
+            city = (d.get("City") or "").strip()
+            if u and city:
+                d["displayName"] = f"{c_name} - {u} ({city})"
+            elif u:
+                d["displayName"] = f"{c_name} - {u}"
+            elif city:
+                d["displayName"] = f"{c_name} ({city})"
+            else:
+                d["displayName"] = c_name
+            out.append(d)
+        return out
 
     @staticmethod
     def get_available_fin_years(db: Session) -> List[str]:
@@ -191,16 +213,24 @@ class CustomerReportService:
             SELECT TOP 1
                 LedgerCode,
                 LedgerName,
+                CustomerUnit,
+                ParentLedgerCode,
                 ChequePrintName,
                 AccountType AS AccLedgerHeaderName,
                 LedgerGrpName,
                 LedgerType,
-                GSTNo,
-                PanNo,
+                HouseNo,
+                Add1,
+                Add2,
                 City,
                 State,
+                PinCode,
+                Country,
+                ContectName,
                 MobileNo,
                 MailID,
+                GSTNo,
+                PanNo,
                 ISNULL(OpeningBalance, 0) AS OpeningBalance,
                 ISNULL(NULLIF(LTRIM(RTRIM(BalanceType)), ''), 'Dr') AS BalanceType
             FROM dbo.Acc_Mst_Ledger
@@ -335,6 +365,8 @@ class CustomerReportService:
 
         params = {
             "code": c_code,
+            "unit": (customer.get("CustomerUnit") or "").strip(),
+            "has_unit": 1 if (customer.get("CustomerUnit") or "").strip() else 0,
             "name_lower": c_name_clean.lower(),
             "name_like": c_name_like,
             "core_like": c_core_like,
@@ -362,7 +394,10 @@ class CustomerReportService:
                 Remarks,
                 LTRIM(RTRIM(FinYearVal)) AS FinYearVal
             FROM dbo.Acc_Quotation_Main
-            WHERE ((:code <> '' AND SuppCode = :code) OR LOWER(LTRIM(RTRIM(CustomerName))) = :name_lower OR CustomerName LIKE :name_like OR CustomerName LIKE :core_like)
+            WHERE (
+                (:code <> '' AND (SuppCode = :code OR (:has_unit = 1 AND (SuppCode IS NULL OR SuppCode = '') AND LOWER(LTRIM(RTRIM(CustomerName))) = :name_lower)))
+                OR (:code = '' AND (LOWER(LTRIM(RTRIM(CustomerName))) = :name_lower OR CustomerName LIKE :name_like OR CustomerName LIKE :core_like))
+            )
               AND Status <> 'Delete'
               AND (
                   :is_all = 1
@@ -392,7 +427,10 @@ class CustomerReportService:
                 Remarks,
                 LTRIM(RTRIM(FinYearVal)) AS FinYearVal
             FROM dbo.Acc_Proforma_Inv_Main
-            WHERE ((:code <> '' AND CustomerCode = :code) OR LOWER(LTRIM(RTRIM(CustomerName))) = :name_lower OR CustomerName LIKE :name_like OR CustomerName LIKE :core_like)
+            WHERE (
+                (:code <> '' AND (CustomerCode = :code OR (:has_unit = 1 AND (CustomerCode IS NULL OR CustomerCode = '') AND LOWER(LTRIM(RTRIM(CustomerName))) = :name_lower)))
+                OR (:code = '' AND (LOWER(LTRIM(RTRIM(CustomerName))) = :name_lower OR CustomerName LIKE :name_like OR CustomerName LIKE :core_like))
+            )
               AND Status <> 'Delete'
               AND (
                   :is_all = 1
@@ -414,15 +452,23 @@ class CustomerReportService:
                 InvoiceDate,
                 CustomerCode,
                 CustomerName,
+                CustomerUnit,
                 GST,
                 TotalQty,
+                ISNULL(TotalItemAmount, 0) AS TotalItemAmount,
+                ISNULL(TotalCGSTAmount, 0) AS TotalCGSTAmount,
+                ISNULL(TotalSGSTAmount, 0) AS TotalSGSTAmount,
+                ISNULL(TotalIGSTAmount, 0) AS TotalIGSTAmount,
                 TotalAmount,
                 NetAmount,
                 Approval_Status AS ApprovalStatus,
                 Remarks,
                 LTRIM(RTRIM(FinYearVal)) AS FinYearVal
             FROM dbo.Acc_Sales_Inv_Main
-            WHERE ((:code <> '' AND CustomerCode = :code) OR LOWER(LTRIM(RTRIM(CustomerName))) = :name_lower OR CustomerName LIKE :name_like OR CustomerName LIKE :core_like)
+            WHERE (
+                (:code <> '' AND (CustomerCode = :code OR (:has_unit = 1 AND (CustomerCode IS NULL OR CustomerCode = '') AND LOWER(LTRIM(RTRIM(CustomerName))) = :name_lower AND CustomerUnit = :unit)))
+                OR (:code = '' AND (LOWER(LTRIM(RTRIM(CustomerName))) = :name_lower OR CustomerName LIKE :name_like OR CustomerName LIKE :core_like))
+            )
               AND Status <> 'Delete'
               AND (
                   :is_all = 1
@@ -458,7 +504,10 @@ class CustomerReportService:
                 Narration,
                 LTRIM(RTRIM(FinYearVal)) AS FinYearVal
             FROM dbo.Acc_Trans_All
-            WHERE ((:code <> '' AND LeaderCode = :code) OR LOWER(LTRIM(RTRIM(LedgerName))) = :name_lower OR LedgerName LIKE :name_like OR LedgerName LIKE :core_like)
+            WHERE (
+                (:code <> '' AND LeaderCode = :code)
+                OR (:code = '' AND (LOWER(LTRIM(RTRIM(LedgerName))) = :name_lower OR LedgerName LIKE :name_like OR LedgerName LIKE :core_like))
+            )
               AND ISNULL(Status, '') <> 'Delete'
               AND ISNULL(TransType, '') <> 'Opening Balance'
               AND (
@@ -671,20 +720,65 @@ class CustomerReportService:
             "particulars": op_particulars,
             "voucher_type": "Opening",
             "voucher_no": "-",
+            "taxable_amt": 0.0,
+            "cgst_amt": 0.0,
+            "sgst_amt": 0.0,
+            "igst_amt": 0.0,
+            "total_gst": 0.0,
             "debit": current_balance if current_balance >= 0 else 0.0,
+            "tds_amt": 0.0,
+            "net_received": 0.0,
             "credit": abs(current_balance) if current_balance < 0 else 0.0,
             "running_balance": round(current_balance, 2),
         })
 
-        # Combine Sales Invoices (Debits) and Tally Entries
+        # Fetch Customer_Receipt_Main records for explicit TDS and Net Received tracking
+        receipt_tds_map = {}
+        try:
+            r_has_table = db.execute(text("SELECT OBJECT_ID('dbo.Customer_Receipt_Main', 'U')")).scalar()
+            if r_has_table:
+                r_sql = """
+                    SELECT ReceiptNo, PaidAmount, TotTDSAmt, TDSPercentage, TDSSection, NetAmount, BankName, PaymentMode
+                    FROM dbo.Customer_Receipt_Main
+                    WHERE ((:code <> '' AND CustomerCode = :code) OR LOWER(LTRIM(RTRIM(CustomerName))) = :name_lower OR CustomerName LIKE :name_like OR CustomerName LIKE :core_like)
+                      AND ISNULL(Status, '') <> 'Delete'
+                """
+                r_rows = db.execute(text(r_sql), params).mappings().all()
+                for r in r_rows:
+                    receipt_tds_map[str(r["ReceiptNo"]).strip()] = dict(r)
+        except Exception:
+            pass
+
+        # Combine Sales Invoices (Debits) and Customer Receipts (Credits)
         ledger_raw = []
         for s in sales_invoices:
+            taxable = cls._to_float(s.get("TotalItemAmount"))
+            cgst = cls._to_float(s.get("TotalCGSTAmount"))
+            sgst = cls._to_float(s.get("TotalSGSTAmount"))
+            igst = cls._to_float(s.get("TotalIGSTAmount"))
+            tot_gst = cgst + sgst + igst
+            net_amt = cls._to_float(s.get("NetAmount"))
+            if taxable == 0.0 and tot_gst == 0.0:
+                taxable = net_amt
+
+            inv_no = str(s.get("InvoiceNo") or s.get("TransNo") or "")
+            desc = f"Sales Invoice - {inv_no}"
+            if s.get("Remarks"):
+                desc += f" ({s.get('Remarks')})"
+
             ledger_raw.append({
-                "date": str(s.get("InvoiceDate") or ""),
-                "particulars": f"Sales Invoice - {s.get('TransNo')}",
+                "date": str(s.get("InvoiceDate") or s.get("TransDate") or ""),
+                "particulars": desc,
                 "voucher_type": "Sales Invoice",
-                "voucher_no": s.get("TransNo"),
-                "debit": cls._to_float(s.get("NetAmount")),
+                "voucher_no": inv_no,
+                "taxable_amt": taxable,
+                "cgst_amt": cgst,
+                "sgst_amt": sgst,
+                "igst_amt": igst,
+                "total_gst": tot_gst,
+                "debit": net_amt,
+                "tds_amt": 0.0,
+                "net_received": 0.0,
                 "credit": 0.0,
             })
 
@@ -695,21 +789,39 @@ class CustomerReportService:
             trans_type = str(t.get("TransType") or "").strip()
             narration = str(t.get("Narration") or "").strip()
             is_erp = trans_no.startswith("R-BK/") or trans_no.startswith("R-CS/") or trans_no.startswith("R-")
+            is_receipt = is_erp or (trans_type.lower() in ("receipt", "cash receipts", "bank receipt", "coral receipt entry")) or cr > 0
+
+            # ONLY include Sales Invoice and Payment / Customer Receipts in the ledger statement!
+            if not is_receipt and dr > 0 and cr == 0:
+                continue
+
+            tds_amt = 0.0
+            paid_cash = cr
+            if trans_no in receipt_tds_map:
+                tds_amt = cls._to_float(receipt_tds_map[trans_no].get("TotTDSAmt"))
+                paid_cash = cls._to_float(receipt_tds_map[trans_no].get("PaidAmount"))
+                if paid_cash == 0 and cr > 0:
+                    paid_cash = max(0.0, cr - tds_amt)
+            else:
+                tds_match = re.search(r"TDS Deducted:\s*(?:Rs\.\s*)?([0-9,]+(?:\.[0-9]+)?)", narration, re.IGNORECASE)
+                if tds_match:
+                    try:
+                        tds_amt = float(tds_match.group(1).replace(",", ""))
+                        paid_cash = max(0.0, cr - tds_amt)
+                    except Exception:
+                        pass
 
             if is_erp:
                 desc = f"Customer Receipt - {trans_no}"
                 v_type = "Customer Receipt"
-            elif trans_type.lower() in ("receipt", "cash receipts", "bank receipt"):
+            elif is_receipt:
                 desc = f"Payment Receipt - {trans_no}"
                 v_type = "Payment Receipt"
-            elif trans_type.lower() in ("payment", "cash payments", "bank payment"):
-                desc = f"Payment - {trans_no}"
-                v_type = "Payment"
             else:
                 desc = f"{trans_type} - {trans_no}"
-                v_type = trans_type or "Journal"
+                v_type = trans_type or "Receipt"
 
-            if narration:
+            if narration and "TDS Deducted" not in desc:
                 desc += f" ({narration})"
 
             ledger_raw.append({
@@ -717,7 +829,14 @@ class CustomerReportService:
                 "particulars": desc,
                 "voucher_type": v_type,
                 "voucher_no": trans_no,
+                "taxable_amt": 0.0,
+                "cgst_amt": 0.0,
+                "sgst_amt": 0.0,
+                "igst_amt": 0.0,
+                "total_gst": 0.0,
                 "debit": dr,
+                "tds_amt": tds_amt,
+                "net_received": paid_cash if cr > 0 else 0.0,
                 "credit": cr,
             })
 
@@ -745,7 +864,14 @@ class CustomerReportService:
                 "particulars": item["particulars"],
                 "voucher_type": item["voucher_type"],
                 "voucher_no": item["voucher_no"],
+                "taxable_amt": item["taxable_amt"],
+                "cgst_amt": item["cgst_amt"],
+                "sgst_amt": item["sgst_amt"],
+                "igst_amt": item["igst_amt"],
+                "total_gst": item["total_gst"],
                 "debit": dr,
+                "tds_amt": item["tds_amt"],
+                "net_received": item["net_received"],
                 "credit": cr,
                 "running_balance": round(current_balance, 2),
             })
@@ -969,3 +1095,206 @@ class CustomerReportService:
         }
 
         return inv_list, summary
+
+    @classmethod
+    def get_portfolio_summary(cls, db: Session, fin_year: str = "ALL") -> Dict[str, Any]:
+        """
+        Industry & Portfolio-level Client Analytics for Customer 360 Dashboard.
+        Computes total client count, total billed, collections, TDS, and top debtors.
+        """
+        fy = (fin_year or "ALL").strip()
+        is_all = 1 if fy.upper() in ("ALL", "", "NONE") else 0
+        fy_dash = fy.replace("_", "-")
+        fy_under = fy.replace("-", "_")
+        params = {
+            "is_all": is_all,
+            "fy_dash": fy_dash,
+            "fy_under": fy_under,
+        }
+
+        # 1. Total Customer Count
+        count_sql = """
+            SELECT COUNT(*) AS ClientCount
+            FROM dbo.Acc_Mst_Ledger
+            WHERE LedgerType = 'Customer' AND Status <> 'Delete'
+        """
+        try:
+            client_count = db.execute(text(count_sql)).scalar() or 0
+        except Exception:
+            client_count = 0
+
+        if client_count == 0:
+            try:
+                client_count = db.execute(text("SELECT COUNT(DISTINCT CustomerName) FROM dbo.Acc_Sales_Inv_Main WHERE Status <> 'Delete'")).scalar() or 0
+            except Exception:
+                client_count = 0
+
+        # 2. Total Invoiced & Taxes
+        inv_sql = """
+            SELECT 
+                ISNULL(COUNT(*), 0) AS TotalInvoices,
+                ISNULL(SUM(TotalItemAmount), 0) AS TotalTaxable,
+                ISNULL(SUM(TotalCGSTAmount), 0) AS TotalCGST,
+                ISNULL(SUM(TotalSGSTAmount), 0) AS TotalSGST,
+                ISNULL(SUM(TotalIGSTAmount), 0) AS TotalIGST,
+                ISNULL(SUM(NetAmount), 0) AS TotalBilled
+            FROM dbo.Acc_Sales_Inv_Main
+            WHERE Status <> 'Delete'
+              AND (
+                  :is_all = 1
+                  OR REPLACE(LTRIM(RTRIM(FinYearVal)), '_', '-') = :fy_dash
+                  OR REPLACE(LTRIM(RTRIM(FinYearVal)), '-', '_') = :fy_under
+              )
+        """
+        inv_row = db.execute(text(inv_sql), params).mappings().first() or {}
+        tot_billed = cls._to_float(inv_row.get("TotalBilled"))
+        tot_taxable = cls._to_float(inv_row.get("TotalTaxable"))
+        tot_cgst = cls._to_float(inv_row.get("TotalCGST"))
+        tot_sgst = cls._to_float(inv_row.get("TotalSGST"))
+        tot_igst = cls._to_float(inv_row.get("TotalIGST"))
+        tot_gst = tot_cgst + tot_sgst + tot_igst
+        if tot_taxable == 0 and tot_billed > 0 and tot_gst == 0:
+            tot_taxable = tot_billed
+
+        # 3. Total Collections from Customer Accounts
+        rec_sql = """
+            SELECT ISNULL(SUM(CreditAmount), 0) AS TotalCollected
+            FROM dbo.Acc_Trans_All
+            WHERE ISNULL(Status, '') <> 'Delete'
+              AND ISNULL(TransType, '') <> 'Opening Balance'
+              AND (
+                  LOWER(LTRIM(RTRIM(TransType))) IN ('receipt', 'customer receipt', 'cash receipts', 'bank receipt', 'coral receipt entry')
+                  OR TransNo LIKE 'R-%' OR TransNo LIKE 'R-BK/%' OR TransNo LIKE 'R-CS/%'
+              )
+              AND (
+                  :is_all = 1
+                  OR REPLACE(LTRIM(RTRIM(FinYearVal)), '_', '-') = :fy_dash
+                  OR REPLACE(LTRIM(RTRIM(FinYearVal)), '-', '_') = :fy_under
+              )
+        """
+        try:
+            rec_row = db.execute(text(rec_sql), params).mappings().first() or {}
+            tot_collected = cls._to_float(rec_row.get("TotalCollected"))
+        except Exception:
+            tot_collected = 0.0
+
+        # 4. Total TDS Deductions
+        tds_sql = """
+            SELECT ISNULL(SUM(DebitAmount), 0) AS TotalTDS
+            FROM dbo.Acc_Trans_All
+            WHERE ISNULL(Status, '') <> 'Delete'
+              AND (LeaderCode = 'GL/00166' OR LedgerName LIKE '%TDS%')
+              AND (
+                  :is_all = 1
+                  OR REPLACE(LTRIM(RTRIM(FinYearVal)), '_', '-') = :fy_dash
+                  OR REPLACE(LTRIM(RTRIM(FinYearVal)), '-', '_') = :fy_under
+              )
+        """
+        try:
+            tds_row = db.execute(text(tds_sql), params).mappings().first() or {}
+            tot_tds = cls._to_float(tds_row.get("TotalTDS"))
+        except Exception:
+            tot_tds = 0.0
+
+        # Total Opening Balance of all customer accounts
+        op_sql = """
+            SELECT 
+                ISNULL(SUM(CASE WHEN LOWER(LTRIM(RTRIM(BalanceType))) = 'cr' THEN -ISNULL(OpeningBalance, 0) ELSE ISNULL(OpeningBalance, 0) END), 0) AS TotalOpening
+            FROM dbo.Acc_Mst_Ledger
+            WHERE LedgerType = 'Customer' AND Status <> 'Delete'
+        """
+        try:
+            tot_opening = cls._to_float(db.execute(text(op_sql)).scalar())
+        except Exception:
+            tot_opening = 0.0
+
+        total_outstanding = max(0.0, tot_opening + tot_billed - tot_collected)
+
+        # 5. Top 15 Outstanding Clients Breakdown
+        top_sql = """
+            SELECT TOP 15
+                m.LedgerCode,
+                m.LedgerName,
+                m.City,
+                m.State,
+                m.GSTNo,
+                ISNULL(m.OpeningBalance, 0) AS OpeningBalance,
+                ISNULL(m.BalanceType, 'Dr') AS BalanceType,
+                ISNULL(s.TotalBilled, 0) AS TotalBilled,
+                ISNULL(r.TotalCollected, 0) AS TotalCollected,
+                (
+                    CASE WHEN LOWER(LTRIM(RTRIM(m.BalanceType))) = 'cr' THEN -ISNULL(m.OpeningBalance, 0) ELSE ISNULL(m.OpeningBalance, 0) END
+                    + ISNULL(s.TotalBilled, 0)
+                    - ISNULL(r.TotalCollected, 0)
+                ) AS NetOutstanding
+            FROM dbo.Acc_Mst_Ledger m
+            LEFT JOIN (
+                SELECT CustomerCode, SUM(NetAmount) AS TotalBilled
+                FROM dbo.Acc_Sales_Inv_Main
+                WHERE Status <> 'Delete'
+                  AND (:is_all = 1 OR REPLACE(LTRIM(RTRIM(FinYearVal)), '_', '-') = :fy_dash)
+                GROUP BY CustomerCode
+            ) s ON s.CustomerCode = m.LedgerCode
+            LEFT JOIN (
+                SELECT LeaderCode, SUM(CreditAmount) AS TotalCollected
+                FROM dbo.Acc_Trans_All
+                WHERE ISNULL(Status, '') <> 'Delete'
+                  AND (
+                      LOWER(LTRIM(RTRIM(TransType))) IN ('receipt', 'customer receipt', 'cash receipts', 'bank receipt', 'coral receipt entry')
+                      OR TransNo LIKE 'R-%'
+                  )
+                  AND (:is_all = 1 OR REPLACE(LTRIM(RTRIM(FinYearVal)), '_', '-') = :fy_dash)
+                GROUP BY LeaderCode
+            ) r ON r.LeaderCode = m.LedgerCode
+            WHERE m.LedgerType = 'Customer'
+              AND m.Status <> 'Delete'
+            ORDER BY NetOutstanding DESC
+        """
+        try:
+            top_rows = db.execute(text(top_sql), params).mappings().all()
+            top_clients = [
+                {
+                    "client_code": r["LedgerCode"],
+                    "client_name": r["LedgerName"],
+                    "city": r["City"] or "",
+                    "state": r["State"] or "",
+                    "gst_no": r["GSTNo"] or "",
+                    "opening_balance": cls._to_float(r["OpeningBalance"]),
+                    "balance_type": r["BalanceType"] or "Dr",
+                    "total_billed": round(cls._to_float(r["TotalBilled"]), 2),
+                    "total_invoiced": round(cls._to_float(r["TotalBilled"]), 2),
+                    "total_collected": round(cls._to_float(r["TotalCollected"]), 2),
+                    "total_collections": round(cls._to_float(r["TotalCollected"]), 2),
+                    "total_tds": 0.0,
+                    "net_outstanding": round(cls._to_float(r["NetOutstanding"]), 2),
+                    "outstanding_balance": round(cls._to_float(r["NetOutstanding"]), 2),
+                }
+                for r in top_rows
+            ]
+        except Exception:
+            top_clients = []
+
+        return {
+            "fin_year": fy,
+            "total_clients": client_count,
+            "total_clients_count": client_count,
+            "total_invoices_count": int(inv_row.get("TotalInvoices") or 0),
+            "total_taxable": round(tot_taxable, 2),
+            "total_portfolio_taxable": round(tot_taxable, 2),
+            "total_cgst": round(tot_cgst, 2),
+            "total_sgst": round(tot_sgst, 2),
+            "total_igst": round(tot_igst, 2),
+            "total_gst": round(tot_gst, 2),
+            "total_portfolio_gst": round(tot_gst, 2),
+            "total_billed": round(tot_billed, 2),
+            "total_portfolio_invoiced": round(tot_billed, 2),
+            "total_collected": round(tot_collected, 2),
+            "total_portfolio_collections": round(tot_collected, 2),
+            "total_tds": round(tot_tds, 2),
+            "total_portfolio_tds": round(tot_tds, 2),
+            "total_opening": round(tot_opening, 2),
+            "total_outstanding": round(total_outstanding, 2),
+            "total_portfolio_outstanding": round(total_outstanding, 2),
+            "top_clients": top_clients,
+            "top_outstanding_clients": top_clients,
+        }

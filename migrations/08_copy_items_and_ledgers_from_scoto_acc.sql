@@ -215,8 +215,8 @@ SELECT
     src.[Inco_Terms3],
     src.[Area],
     src.[LedgerType],
-    src.[OpeningBalance],
-    src.[BalanceType]
+    0.00 AS [OpeningBalance],
+    CASE WHEN src.[LedgerType] = 'Customer' THEN 'Dr' ELSE 'Cr' END AS [BalanceType]
 FROM [SCOTO_ACC_ERP].[dbo].[Acc_Mst_Ledger] src
 WHERE NOT EXISTS (
     SELECT 1 FROM [dbo].[Acc_Mst_Ledger] tgt 

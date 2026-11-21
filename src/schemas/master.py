@@ -92,6 +92,10 @@ class LedgerBase(BaseModel):
     BalanceType: Optional[str] = "Cr"
     Status: str = Field(default="ACTIVE")
 
+    # Multi-Unit & Plant Support
+    CustomerUnit: Optional[str] = None
+    ParentLedgerCode: Optional[str] = None
+
 
 class LedgerCreate(LedgerBase):
     pass
@@ -140,6 +144,8 @@ class LedgerUpdate(BaseModel):
     OpeningBalance: Optional[str] = None
     BalanceType: Optional[str] = None
     Status: Optional[str] = None
+    CustomerUnit: Optional[str] = None
+    ParentLedgerCode: Optional[str] = None
 
 
 __all__ = [

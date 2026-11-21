@@ -1,4 +1,6 @@
 
+from urllib.parse import unquote
+
 from fastapi import HTTPException
 from sqlalchemy import text
 from sqlalchemy.orm import Session
@@ -148,11 +150,12 @@ def update_item(
     item_code: str,
     payload: ItemUpdate,
 ):
+    item_code = unquote(str(item_code or "")).strip()
     existing = db.execute(
         text("""
             SELECT TOP 1 ItemCode
             FROM dbo.Mst_Item
-            WHERE ItemCode = :item_code
+            WHERE (ItemCode = :item_code OR LOWER(LTRIM(RTRIM(ItemCode))) = LOWER(:item_code))
               AND Status <> 'Delete'
         """),
         {"item_code": item_code},
@@ -205,11 +208,12 @@ def update_item(
 
 
 def delete_item(db: Session, item_code: str):
+    item_code = unquote(str(item_code or "")).strip()
     result = db.execute(
         text("""
             UPDATE dbo.Mst_Item
             SET Status = 'Delete'
-            WHERE ItemCode = :item_code
+            WHERE (ItemCode = :item_code OR LOWER(LTRIM(RTRIM(ItemCode))) = LOWER(:item_code))
               AND Status <> 'Delete'
         """),
         {"item_code": item_code},

@@ -509,6 +509,16 @@ class ReceiptService:
             "create_on": datetime.now().strftime("%b %d %Y %I:%M%p"),
         })
 
+        # Fetch CustomerUnit from Customer Master if available
+        cust_unit_val = getattr(payload, "CustomerUnit", None)
+        if not cust_unit_val and payload.CustomerCode:
+            try:
+                u_row = db.execute(text("SELECT CustomerUnit FROM dbo.Acc_Mst_Ledger WHERE LedgerCode = :c"), {"c": payload.CustomerCode}).scalar()
+                if u_row:
+                    cust_unit_val = str(u_row).strip()
+            except Exception:
+                pass
+
         # 2. Insert Line Items: dbo.Acc_Receipts_Sub
         insert_sub_sql = text("""
             INSERT INTO dbo.Acc_Receipts_Sub (
@@ -516,13 +526,15 @@ class ReceiptService:
                 LedgerCode, LedgerName, PartyName, InvNo, InvDate, InvoiceAmt,
                 GSTName, CGSTPer, CGSTAmt, SGSTPer, SGSTAmt, IGSTPer, IGSTAmt, GSTAmt,
                 TDSName, TDSPer, TDSAmt, TCSName, TCSPer, TCSAmt, SubTotal,
-                RoundOffType, RoundOff, LineTotal, Status, SysName, SysIp, UserId, UserName
+                RoundOffType, RoundOff, LineTotal, Status, SysName, SysIp, UserId, UserName,
+                CustomerUnit
             ) VALUES (
                 :ccode, :lcode, :fin_year_code, :fin_year_val, :trans_no, :trans_date,
                 :ledger_code, :ledger_name, :party_name, :inv_no, :inv_date, :invoice_amt,
                 :gst_name, :cgst_per, :cgst_amt, :sgst_per, :sgst_amt, :igst_per, :igst_amt, :gst_amt,
                 :tds_name, :tds_per, :tds_amt, '-Select-', 0.0, 0.0, :sub_total,
-                'None', 0.0, :line_total, 'Add', 'API_SERVER', '127.0.0.1', :user_id, :user_name
+                'None', 0.0, :line_total, 'Add', 'API_SERVER', '127.0.0.1', :user_id, :user_name,
+                :customer_unit
             )
         """)
 
@@ -557,6 +569,7 @@ class ReceiptService:
                     "line_total": item["net"],
                     "user_id": user,
                     "user_name": user,
+                    "customer_unit": cust_unit_val,
                 })
         else:
             # Single generic allocation when no specific document was provided
@@ -588,6 +601,7 @@ class ReceiptService:
                 "line_total": net_amt,
                 "user_id": user,
                 "user_name": user,
+                "customer_unit": cust_unit_val,
             })
 
         # 3. Post Balanced Double-Entry rows to dbo.Acc_Trans_All

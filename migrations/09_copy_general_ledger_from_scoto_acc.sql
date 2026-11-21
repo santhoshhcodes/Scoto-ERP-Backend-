@@ -60,8 +60,8 @@ SELECT
     src.[UserID],
     src.[UserName],
     src.[CreateOn],
-    src.[OpeningBalance],
-    src.[BalanceType]
+    0.00 AS [OpeningBalance],
+    'Dr' AS [BalanceType]
 FROM [SCOTO_ACC_ERP].[dbo].[Acc_Mst_GeneralLedger] src
 WHERE NOT EXISTS (
     SELECT 1 FROM [dbo].[Acc_Mst_GeneralLedger] tgt 

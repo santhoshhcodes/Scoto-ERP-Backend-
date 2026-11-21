@@ -48,6 +48,24 @@ def get_report_financial_years(
     }
 
 
+@router.get("/portfolio-summary")
+def get_customer_portfolio_summary(
+    fin_year: Optional[str] = Query(default="ALL"),
+    db: Session = Depends(get_mssql_session("db2")),
+):
+    """
+    Industry & Portfolio-level Client Financial Analytics for Customer 360 Dashboard:
+    Total clients, overall turnover, collections, TDS, and top outstanding clients.
+    """
+    return {
+        "success": True,
+        "data": CustomerReportService.get_portfolio_summary(
+            db=db,
+            fin_year=fin_year,
+        ),
+    }
+
+
 @router.get("/dossier/{client_code:path}")
 def get_customer_dossier_by_path(
     client_code: str,

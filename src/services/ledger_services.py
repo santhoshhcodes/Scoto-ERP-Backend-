@@ -1,10 +1,13 @@
 from datetime import datetime
 from decimal import Decimal
 from urllib.parse import unquote
+from typing import Optional, Dict, Any, List
 from fastapi import HTTPException
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
+from src.helpers.pagination import paginate_raw_sql
+from src.helpers.sorting import resolve_raw_sort
 from src.schemas.master import LedgerCreate, LedgerUpdate
 
 
@@ -108,12 +111,31 @@ def _sync_opening_balance_transaction(
         )
 
 
+ALLOWED_LEDGER_SORTS = {
+    "LedgerCode": "LedgerCode",
+    "LedgerName": "LedgerName",
+    "AccGroupName": "AccGroupName",
+    "AccCateName": "AccCateName",
+    "AccLedgerHeaderName": "AccLedgerHeaderName",
+    "LedgerType": "LedgerType",
+    "Region": "Region",
+    "City": "City",
+    "GSTNo": "GSTNo",
+    "Status": "Status",
+}
+
+
 def get_ledgers(
     db: Session,
-    search: str | None = None,
-    ledger_type: str | None = None,
+    search: Optional[str] = None,
+    ledger_type: Optional[str] = None,
+    page: int = 1,
+    page_size: int = 20,
+    sort_by: Optional[str] = None,
+    sort_order: Optional[str] = "asc",
+    fetch_all: bool = False,
 ):
-    query = """
+    union_query = """
         SELECT
             AccGenLdgCode AS LedgerCode,
             AccGenLdgName AS LedgerName,
@@ -215,35 +237,46 @@ def get_ledgers(
         WHERE Status <> 'Delete'
     """
 
-    rows = db.execute(text(query)).mappings().all()
-    ledgers = [dict(row) for row in rows]
+    base_query = f"""
+        SELECT *
+        FROM ({union_query}) AS _unified_ledgers
+        WHERE 1=1
+    """
 
+    params = {}
     if ledger_type and ledger_type != "ALL":
-        ledgers = [
-            item for item in ledgers
-            if item.get("LedgerType") == ledger_type
-        ]
+        base_query += " AND LedgerType = :ledger_type"
+        params["ledger_type"] = ledger_type
 
     if search and search.strip():
-        term = search.strip().casefold()
-        ledgers = [
-            item for item in ledgers
-            if any(
-                term in str(item.get(field) or "").casefold()
-                for field in (
-                    "LedgerName",
-                    "LedgerCode",
-                    "GSTNo",
-                    "City",
-                )
+        base_query += """
+            AND (
+                LedgerName LIKE :search
+                OR LedgerCode LIKE :search
+                OR GSTNo LIKE :search
+                OR City LIKE :search
             )
-        ]
+        """
+        params["search"] = f"%{search.strip()}%"
 
-    return {
-        "success": True,
-        "count": len(ledgers),
-        "data": ledgers,
-    }
+    sort_col, sort_dir = resolve_raw_sort(
+        sort_by=sort_by,
+        sort_order=sort_order,
+        allowed_sort_columns=ALLOWED_LEDGER_SORTS,
+        default_column="LedgerCode",
+        default_order="ASC",
+    )
+
+    return paginate_raw_sql(
+        db=db,
+        base_query=base_query,
+        params=params,
+        page=page,
+        page_size=page_size,
+        sort_column=sort_col,
+        sort_order=sort_dir,
+        fetch_all=fetch_all,
+    )
 
 
 def get_account_headers(db: Session):

@@ -1,10 +1,13 @@
 from datetime import date, timedelta
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
+from typing import Optional, Dict, Any, List
 
 from fastapi import HTTPException
 from sqlalchemy import text, bindparam
 from sqlalchemy.orm import Session
 
+from src.helpers.pagination import paginate_raw_sql
+from src.helpers.sorting import resolve_raw_sort
 from src.schemas.travel_expense import TravelExpenseClaimCreate, TravelExpenseStatusUpdate
 from src.services.office_expense_service import OfficeExpenseService
 
@@ -443,6 +446,18 @@ class TravelExpenseService:
 
         return claims
 
+    ALLOWED_SORT_COLUMNS = {
+        "claim_id": "c.ClaimId",
+        "ClaimId": "c.ClaimId",
+        "employee_code": "c.EmployeeCode",
+        "travel_start_date": "c.TravelStartDate",
+        "travel_end_date": "c.TravelEndDate",
+        "client_name": "c.ClientName",
+        "total_amount": "c.TotalAmount",
+        "status": "c.Status",
+        "created_date": "c.CreatedDate",
+    }
+
     @staticmethod
     def list_claims(
         db: Session,
@@ -450,6 +465,11 @@ class TravelExpenseService:
         status: str | None = None,
         from_date: date | None = None,
         to_date: date | None = None,
+        page: Optional[int] = None,
+        page_size: Optional[int] = None,
+        sort_by: Optional[str] = None,
+        sort_order: Optional[str] = "desc",
+        fetch_all: bool = False,
     ):
         if from_date and to_date and from_date > to_date:
             raise HTTPException(
@@ -465,77 +485,151 @@ class TravelExpenseService:
                     detail="Invalid claim status.",
                 )
 
-        rows = db.execute(
-            text("""
-                SELECT
-                    c.ClaimId AS claim_id,
-                    c.EmployeeCode AS employee_code,
-                    COALESCE(
-                        NULLIF(e.DisplayName, ''),
-                        CONCAT(e.FirstName, ' ', COALESCE(e.LastName, ''))
-                    ) AS employee_name,
-                    e.DepartmentName AS department_name,
-                    e.DesignationName AS designation_name,
-                    c.TravelStartDate AS travel_start_date,
-                    c.TravelEndDate AS travel_end_date,
-                    c.ClientCode AS client_code,
-                    c.ClientName AS client_name,
-                    c.Destination AS destination,
-                    c.Purpose AS purpose,
-                    c.TotalAmount AS total_amount,
-                    c.Status AS status,
-                    c.FundId AS fund_id,
-                    c.ExpenseId AS expense_id,
-                    c.PaidDate AS paid_date,
-                    c.CreatedDate AS created_date,
-                    c.CreatedBy AS created_by,
-                    COUNT(i.ItemId) AS item_count,
-                    COALESCE(SUM(CASE WHEN i.ExpenseCategory = 'PETROL' THEN i.Amount ELSE 0 END), 0) AS petrol_amount,
-                    COALESCE(SUM(CASE WHEN i.ExpenseCategory = 'FOOD' THEN i.Amount ELSE 0 END), 0) AS food_amount,
-                    COALESCE(SUM(CASE WHEN i.ExpenseCategory = 'BUS_TICKET' THEN i.Amount ELSE 0 END), 0) AS bus_ticket_amount,
-                    COALESCE(SUM(CASE WHEN i.ExpenseCategory = 'ROOM' THEN i.Amount ELSE 0 END), 0) AS room_amount,
-                    COALESCE(SUM(CASE WHEN i.ExpenseCategory = 'OTHER' THEN i.Amount ELSE 0 END), 0) AS other_amount
-                FROM dbo.TravelExpense_Claim c
-                LEFT JOIN dbo.Employee_Mst e
-                    ON e.EmployeeCode = c.EmployeeCode
-                LEFT JOIN dbo.TravelExpense_Item i
-                    ON i.ClaimId = c.ClaimId
-                WHERE
-                    (:employee_code IS NULL OR c.EmployeeCode = :employee_code)
-                    AND (:status IS NULL OR c.Status = :status)
-                    AND (:from_date IS NULL OR c.TravelStartDate >= :from_date)
-                    AND (:to_date IS NULL OR c.TravelStartDate < DATEADD(day, 1, :to_date))
-                GROUP BY
-                    c.ClaimId,
-                    c.EmployeeCode,
-                    e.DisplayName,
-                    e.FirstName,
-                    e.LastName,
-                    e.DepartmentName,
-                    e.DesignationName,
-                    c.TravelStartDate,
-                    c.TravelEndDate,
-                    c.ClientCode,
-                    c.ClientName,
-                    c.Destination,
-                    c.Purpose,
-                    c.TotalAmount,
-                    c.Status,
-                    c.FundId,
-                    c.ExpenseId,
-                    c.PaidDate,
-                    c.CreatedDate,
-                    c.CreatedBy
-                ORDER BY c.ClaimId DESC
-            """),
-            {
-                "employee_code": employee_code,
-                "status": status,
-                "from_date": from_date,
-                "to_date": to_date,
-            },
-        ).mappings().all()
+        params = {
+            "employee_code": employee_code,
+            "status": status,
+            "from_date": from_date,
+            "to_date": to_date,
+        }
 
+        where_clause = """
+            WHERE
+                (:employee_code IS NULL OR c.EmployeeCode = :employee_code)
+                AND (:status IS NULL OR c.Status = :status)
+                AND (:from_date IS NULL OR c.TravelStartDate >= :from_date)
+                AND (:to_date IS NULL OR c.TravelStartDate < DATEADD(day, 1, :to_date))
+        """
+
+        group_by_clause = """
+            GROUP BY
+                c.ClaimId,
+                c.EmployeeCode,
+                e.DisplayName,
+                e.FirstName,
+                e.LastName,
+                e.DepartmentName,
+                e.DesignationName,
+                c.TravelStartDate,
+                c.TravelEndDate,
+                c.ClientCode,
+                c.ClientName,
+                c.Destination,
+                c.Purpose,
+                c.TotalAmount,
+                c.Status,
+                c.FundId,
+                c.ExpenseId,
+                c.PaidDate,
+                c.CreatedDate,
+                c.CreatedBy
+        """
+
+        select_cols = """
+            SELECT
+                c.ClaimId AS claim_id,
+                c.EmployeeCode AS employee_code,
+                COALESCE(
+                    NULLIF(e.DisplayName, ''),
+                    CONCAT(e.FirstName, ' ', COALESCE(e.LastName, ''))
+                ) AS employee_name,
+                e.DepartmentName AS department_name,
+                e.DesignationName AS designation_name,
+                c.TravelStartDate AS travel_start_date,
+                c.TravelEndDate AS travel_end_date,
+                c.ClientCode AS client_code,
+                c.ClientName AS client_name,
+                c.Destination AS destination,
+                c.Purpose AS purpose,
+                c.TotalAmount AS total_amount,
+                c.Status AS status,
+                c.FundId AS fund_id,
+                c.ExpenseId AS expense_id,
+                c.PaidDate AS paid_date,
+                c.CreatedDate AS created_date,
+                c.CreatedBy AS created_by,
+                COUNT(i.ItemId) AS item_count,
+                COALESCE(SUM(CASE WHEN i.ExpenseCategory = 'PETROL' THEN i.Amount ELSE 0 END), 0) AS petrol_amount,
+                COALESCE(SUM(CASE WHEN i.ExpenseCategory = 'FOOD' THEN i.Amount ELSE 0 END), 0) AS food_amount,
+                COALESCE(SUM(CASE WHEN i.ExpenseCategory = 'BUS_TICKET' THEN i.Amount ELSE 0 END), 0) AS bus_ticket_amount,
+                COALESCE(SUM(CASE WHEN i.ExpenseCategory = 'ROOM' THEN i.Amount ELSE 0 END), 0) AS room_amount,
+                COALESCE(SUM(CASE WHEN i.ExpenseCategory = 'OTHER' THEN i.Amount ELSE 0 END), 0) AS other_amount
+            FROM dbo.TravelExpense_Claim c
+            LEFT JOIN dbo.Employee_Mst e
+                ON e.EmployeeCode = c.EmployeeCode
+            LEFT JOIN dbo.TravelExpense_Item i
+                ON i.ClaimId = c.ClaimId
+        """
+
+        sort_col, sort_dir = resolve_raw_sort(
+            sort_by=sort_by,
+            sort_order=sort_order,
+            allowed_sort_columns=TravelExpenseService.ALLOWED_SORT_COLUMNS,
+            default_column="c.ClaimId",
+            default_order="DESC",
+        )
+
+        # If paginated request
+        if page is not None or page_size is not None or fetch_all:
+            count_sql = f"""
+                SELECT COUNT(DISTINCT c.ClaimId)
+                FROM dbo.TravelExpense_Claim c
+                {where_clause}
+            """
+            total_records = db.execute(text(count_sql), params).scalar() or 0
+
+            calc_page = page if page and page > 0 else 1
+            calc_size = page_size if page_size and page_size > 0 else 20
+
+            if fetch_all or calc_size <= 0:
+                paged_sql = f"""
+                    {select_cols}
+                    {where_clause}
+                    {group_by_clause}
+                    ORDER BY {sort_col} {sort_dir}
+                """
+                rows = db.execute(text(paged_sql), params).mappings().all()
+            else:
+                calc_offset = (calc_page - 1) * calc_size
+                paged_sql = f"""
+                    {select_cols}
+                    {where_clause}
+                    {group_by_clause}
+                    ORDER BY {sort_col} {sort_dir}
+                    OFFSET :_offset ROWS FETCH NEXT :_size ROWS ONLY
+                """
+                exec_params = {**params, "_offset": calc_offset, "_size": calc_size}
+                rows = db.execute(text(paged_sql), exec_params).mappings().all()
+
+            claims = [dict(row) for row in rows]
+            audited = TravelExpenseService._audit_claims(db, claims)
+            envelope = {
+                "success": True,
+                "count": total_records,
+                "total": total_records,
+                "claims": audited,
+                "data": audited,
+                "items": audited,
+                "pagination": {
+                    "page": calc_page,
+                    "page_size": calc_size,
+                    "total_records": total_records,
+                    "total": total_records,
+                    "total_pages": (total_records + calc_size - 1) // calc_size if total_records > 0 else 0,
+                    "has_next": calc_page < ((total_records + calc_size - 1) // calc_size if total_records > 0 else 0),
+                    "has_previous": calc_page > 1,
+                    "has_prev": calc_page > 1,
+                }
+            }
+            return envelope
+
+        # Legacy raw array
+        legacy_sql = f"""
+            {select_cols}
+            {where_clause}
+            {group_by_clause}
+            ORDER BY c.ClaimId DESC
+        """
+        rows = db.execute(text(legacy_sql), params).mappings().all()
         claims = [dict(row) for row in rows]
         return TravelExpenseService._audit_claims(db, claims)
 

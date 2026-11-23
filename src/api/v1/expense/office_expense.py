@@ -42,6 +42,11 @@ def get_transactions(
     from_date: date | None = None,
     to_date: date | None = None,
     transaction_type: str | None = None,
+    page: int | None = Query(default=None, ge=1, description="Page number (1-based)"),
+    page_size: int | None = Query(default=None, ge=1, le=500, description="Items per page"),
+    sort_by: str | None = Query(default=None, description="Column to sort by"),
+    sort_order: str | None = Query(default="desc", description="Sort direction ('asc' or 'desc')"),
+    all: bool = Query(default=False, description="When True, fetch all records"),
     db: Session = Depends(get_mssql_session("db2")),
 ):
     return OfficeExpenseService.list_transactions(
@@ -50,6 +55,11 @@ def get_transactions(
         from_date=from_date,
         to_date=to_date,
         transaction_type=transaction_type,
+        page=page,
+        page_size=page_size,
+        sort_by=sort_by,
+        sort_order=sort_order,
+        fetch_all=all,
     )
 
 

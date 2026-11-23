@@ -1,8 +1,10 @@
 from sqlalchemy import text
 from sqlalchemy.orm import Session
-
 from fastapi import HTTPException
+from typing import Optional, Dict, Any, List
 
+from src.helpers.pagination import paginate_raw_sql
+from src.helpers.sorting import resolve_raw_sort
 from src.schemas.transaction import (
     QuotationCreate,
     QuotationUpdate,
@@ -137,14 +139,37 @@ class QuotationService:
     # GET ALL QUOTATIONS
     # =========================================================
 
+    ALLOWED_SORT_COLUMNS = {
+        "TransNo": "TransNo",
+        "TransDate": "TransDate",
+        "CustomerName": "CustomerName",
+        "CustomerCode": "SuppCode",
+        "Product": "Product",
+        "TotalQty": "TotQty",
+        "TotalItemAmount": "TotItemAmt",
+        "TotalCGSTAmount": "TotCGSTAmt",
+        "TotalSGSTAmount": "TotSGSTAmt",
+        "TotalIGSTAmount": "TotIGSTAmt",
+        "TotalAmount": "TotLineAmt",
+        "FinalNetAmount": "NetAmount",
+        "NetAmount": "NetAmount",
+        "ApprovalStatus": "ApprovalStatus",
+        "Status": "Status",
+    }
+
     @staticmethod
     def get_quotations(
         db: Session,
-        search: str | None = None,
-        status: str | None = None,
-        fin_year: str | None = None,
+        search: Optional[str] = None,
+        status: Optional[str] = None,
+        fin_year: Optional[str] = None,
         only_active: bool = True,
-    ):
+        page: int = 1,
+        page_size: int = 20,
+        sort_by: Optional[str] = None,
+        sort_order: Optional[str] = "desc",
+        fetch_all: bool = False,
+    ) -> Dict[str, Any]:
 
         QuotationService.ensure_tables_exist(db)
 
@@ -287,19 +312,28 @@ class QuotationService:
 
                 params["fin_year"] = fin_year
 
-        results = (
-            db.execute(
-                text(query),
-                params,
-            )
-            .mappings()
-            .all()
+        # Resolve safe sort column and direction
+        sort_col, sort_dir = resolve_raw_sort(
+            sort_by=sort_by,
+            sort_order=sort_order,
+            allowed_sort_columns=QuotationService.ALLOWED_SORT_COLUMNS,
+            default_column="TransDate",
+            default_order="DESC",
+        )
+
+        paged_res = paginate_raw_sql(
+            db=db,
+            base_query=query,
+            params=params,
+            page=page,
+            page_size=page_size,
+            sort_column=sort_col,
+            sort_order=sort_dir,
+            fetch_all=fetch_all,
         )
 
         quotations = []
-
-        for row in results:
-
+        for row in paged_res["data"]:
             quotation = dict(row)
 
             items_query = """
@@ -343,7 +377,9 @@ class QuotationService:
 
             quotations.append(quotation)
 
-        return quotations
+        paged_res["data"] = quotations
+        paged_res["items"] = quotations
+        return paged_res
 
     # =========================================================
     # GET SINGLE QUOTATION

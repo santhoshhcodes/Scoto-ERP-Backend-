@@ -28,6 +28,12 @@ class Settings(BaseSettings):
     MYSQL_PASSWORD: str
     MYSQL_DB_NAME: str = "scoto_erp_db"
 
+    SMTP_HOST: str = "smtp.gmail.com"
+    SMTP_PORT: int = 587
+    SMTP_USER: str = ""
+    SMTP_PASSWORD: str = ""
+    SMTP_FROM: str = "Scoto ERP System <scotosystecadmin@gmail.com>"
+
     @property
     def databases_map(self) -> Dict[str, str]:
         """Maps client keys to active database names."""

@@ -26,21 +26,25 @@ def get_proforma_invoices(
     search: Optional[str] = Query(default=None),
     status_filter: Optional[str] = Query(default=None, alias="status"),
     fin_year: Optional[str] = Query(default=None, description="Financial Year filter"),
+    page: int = Query(default=1, ge=1, description="Page number (1-based)"),
+    page_size: int = Query(default=20, ge=1, le=500, description="Items per page"),
+    sort_by: Optional[str] = Query(default=None, description="Column to sort by"),
+    sort_order: Optional[str] = Query(default="desc", description="Sort direction ('asc' or 'desc')"),
+    all: bool = Query(default=False, description="When True, fetch all records"),
     db: Session = Depends(get_mssql_session("db2")),
 ):
-    """Get all active proforma invoices with their items."""
-    data = ProformaInvoiceService.get_all(
+    """Get active proforma invoices with pagination and sorting."""
+    return ProformaInvoiceService.get_all(
         db=db,
         search=search,
         approval_status=status_filter,
         fin_year=fin_year,
+        page=page,
+        page_size=page_size,
+        sort_by=sort_by,
+        sort_order=sort_order,
+        fetch_all=all,
     )
-
-    return {
-        "success": True,
-        "count": len(data),
-        "data": data,
-    }
 
 
 # Keep this route before the single-invoice route.

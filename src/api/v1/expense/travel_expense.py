@@ -46,19 +46,32 @@ def list_travel_claims(
     status: str | None = Query(default=None),
     from_date: date | None = Query(default=None),
     to_date: date | None = Query(default=None),
+    page: int | None = Query(default=None, ge=1, description="Page number (1-based)"),
+    page_size: int | None = Query(default=None, ge=1, le=500, description="Items per page"),
+    sort_by: str | None = Query(default=None, description="Column to sort by"),
+    sort_order: str | None = Query(default="desc", description="Sort direction ('asc' or 'desc')"),
+    all: bool = Query(default=False, description="When True, fetch all records"),
     db: Session = Depends(get_db),
 ):
-    claims = TravelExpenseService.list_claims(
+    res = TravelExpenseService.list_claims(
         db=db,
         employee_code=employee_code,
         status=status,
         from_date=from_date,
         to_date=to_date,
+        page=page,
+        page_size=page_size,
+        sort_by=sort_by,
+        sort_order=sort_order,
+        fetch_all=all,
     )
 
+    if isinstance(res, dict) and "claims" in res:
+        return res
+
     return {
-        "count": len(claims),
-        "claims": claims,
+        "count": len(res),
+        "claims": res,
     }
 
 

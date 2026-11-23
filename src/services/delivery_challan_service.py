@@ -5,6 +5,8 @@ from fastapi import HTTPException
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
+from src.helpers.pagination import paginate_raw_sql
+from src.helpers.sorting import resolve_raw_sort
 from src.schemas.transaction import (
     DeliveryChallanCreate,
     DeliveryChallanUpdate,
@@ -66,6 +68,23 @@ class DeliveryChallanService:
 
         return [dict(row) for row in result]
 
+    ALLOWED_SORT_COLUMNS = {
+        "Deliveryno": "Deliveryno",
+        "DeliveryNo": "Deliveryno",
+        "Deliverydate": "Deliverydate",
+        "DeliveryDate": "Deliverydate",
+        "Suppliername": "Suppliername",
+        "CustomerName": "Suppliername",
+        "Suppliercode": "Suppliercode",
+        "CustomerCode": "Suppliercode",
+        "Returntype": "Returntype",
+        "ReturnType": "Returntype",
+        "Totqty": "Totqty",
+        "TotalQty": "Totqty",
+        "Status": "Status",
+        "Createon": "Createon",
+    }
+
     @classmethod
     def get_all(
         cls,
@@ -73,7 +92,12 @@ class DeliveryChallanService:
         search: Optional[str] = None,
         return_type: Optional[str] = None,
         fin_year: Optional[str] = None,
-    ) -> List[Dict[str, Any]]:
+        page: int = 1,
+        page_size: int = 20,
+        sort_by: Optional[str] = None,
+        sort_order: Optional[str] = "desc",
+        fetch_all: bool = False,
+    ) -> Dict[str, Any]:
         conditions = []
         params: Dict[str, Any] = {}
 
@@ -145,17 +169,33 @@ class DeliveryChallanService:
             else ""
         )
 
-        query = text(f"""
+        base_query = f"""
             SELECT {cls.HEADER_COLUMNS}
             FROM Delivery_main
             {where_clause}
-            ORDER BY Deliverydate DESC, Deliveryno DESC
-        """)
+        """
 
-        rows = db.execute(query, params).mappings().all()
+        sort_col, sort_dir = resolve_raw_sort(
+            sort_by=sort_by,
+            sort_order=sort_order,
+            allowed_sort_columns=cls.ALLOWED_SORT_COLUMNS,
+            default_column="Deliverydate",
+            default_order="DESC",
+        )
+
+        paged_res = paginate_raw_sql(
+            db=db,
+            base_query=base_query,
+            params=params,
+            page=page,
+            page_size=page_size,
+            sort_column=sort_col,
+            sort_order=sort_dir,
+            fetch_all=fetch_all,
+        )
+
         delivery_challans = []
-
-        for row in rows:
+        for row in paged_res["data"]:
             challan = dict(row)
             challan["Items"] = cls._get_items(
                 db,
@@ -163,7 +203,9 @@ class DeliveryChallanService:
             )
             delivery_challans.append(challan)
 
-        return delivery_challans
+        paged_res["data"] = delivery_challans
+        paged_res["items"] = delivery_challans
+        return paged_res
 
     @classmethod
     def get_by_no(

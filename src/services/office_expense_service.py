@@ -1,9 +1,12 @@
 from datetime import date
-from decimal import Decimal,ROUND_HALF_UP, InvalidOperation
+from decimal import Decimal, ROUND_HALF_UP, InvalidOperation
+from typing import Optional, Dict, Any, List
 
 from fastapi import HTTPException
 from sqlalchemy import text
 from sqlalchemy.orm import Session
+from src.helpers.pagination import paginate_raw_sql
+from src.helpers.sorting import resolve_raw_sort
 from src.schemas.office_daily_expense import (
     SettlementCreate,
 )
@@ -364,6 +367,18 @@ class OfficeExpenseService:
             db.rollback()
             raise
 
+    ALLOWED_SORT_COLUMNS = {
+        "TransactionId": "ExpenseId",
+        "ExpenseId": "ExpenseId",
+        "TransactionDate": "ExpenseDate",
+        "ExpenseDate": "ExpenseDate",
+        "Category": "Category",
+        "Amount": "Amount",
+        "TransactionType": "TransactionType",
+        "SerialNo": "SerialNo",
+        "CreatedAt": "CreatedAt",
+    }
+
     @staticmethod
     def list_transactions(
         db: Session,
@@ -371,6 +386,11 @@ class OfficeExpenseService:
         from_date: date | None = None,
         to_date: date | None = None,
         transaction_type: str | None = None,
+        page: int | None = None,
+        page_size: int | None = None,
+        sort_by: str | None = None,
+        sort_order: str | None = "desc",
+        fetch_all: bool = False,
     ):
         if fund_id:
             OfficeExpenseService._get_fund(db, fund_id)
@@ -387,44 +407,65 @@ class OfficeExpenseService:
                     400, "transaction_type must be CREDIT or DEBIT."
                 )
 
-        rows = db.execute(
-            text("""
-                SELECT
-                    ExpenseId AS TransactionId,
-                    FundId,
-                    ExpenseDate AS TransactionDate,
-                    TransactionType,
-                    Category,
-                    [Description],
-                    ProductName,
-                    Amount,
-                    ReceivedFrom,
-                    ReceiverName,
-                    Quantity,
-                    Remarks,
-                    SerialNo,
-                    CreatedBy,
-                    CreatedAt,
-                    UpdatedBy,
-                    UpdatedAt
-                FROM dbo.OfficeExpense_Transaction
-                WHERE (:fund_id IS NULL OR FundId = :fund_id)
-                  AND (:from_date IS NULL OR ExpenseDate >= :from_date)
-                  AND (:to_date IS NULL OR ExpenseDate < DATEADD(day, 1, :to_date))
-                  AND (
-                      :transaction_type IS NULL
-                      OR TransactionType = :transaction_type
-                  )
-                ORDER BY ExpenseDate, SerialNo, ExpenseId
-            """),
-            {
-                "fund_id": fund_id,
-                "from_date": from_date,
-                "to_date": to_date,
-                "transaction_type": transaction_type,
-            },
-        ).mappings().all()
+        base_query = """
+            SELECT
+                ExpenseId AS TransactionId,
+                FundId,
+                ExpenseDate AS TransactionDate,
+                TransactionType,
+                Category,
+                [Description],
+                ProductName,
+                Amount,
+                ReceivedFrom,
+                ReceiverName,
+                Quantity,
+                Remarks,
+                SerialNo,
+                CreatedBy,
+                CreatedAt,
+                UpdatedBy,
+                UpdatedAt
+            FROM dbo.OfficeExpense_Transaction
+            WHERE (:fund_id IS NULL OR FundId = :fund_id)
+              AND (:from_date IS NULL OR ExpenseDate >= :from_date)
+              AND (:to_date IS NULL OR ExpenseDate < DATEADD(day, 1, :to_date))
+              AND (
+                  :transaction_type IS NULL
+                  OR TransactionType = :transaction_type
+              )
+        """
 
+        params = {
+            "fund_id": fund_id,
+            "from_date": from_date,
+            "to_date": to_date,
+            "transaction_type": transaction_type,
+        }
+
+        # If paginated request
+        if page is not None or page_size is not None or fetch_all:
+            sort_col, sort_dir = resolve_raw_sort(
+                sort_by=sort_by,
+                sort_order=sort_order,
+                allowed_sort_columns=OfficeExpenseService.ALLOWED_SORT_COLUMNS,
+                default_column="ExpenseDate",
+                default_order="DESC",
+            )
+            return paginate_raw_sql(
+                db=db,
+                base_query=base_query,
+                params=params,
+                page=page if page and page > 0 else 1,
+                page_size=page_size if page_size and page_size > 0 else 20,
+                sort_column=sort_col,
+                sort_order=sort_dir,
+                fetch_all=fetch_all,
+            )
+
+        # Legacy raw array
+        legacy_sql = f"{base_query} ORDER BY ExpenseDate DESC, SerialNo DESC, ExpenseId DESC"
+        rows = db.execute(text(legacy_sql), params).mappings().all()
         return [dict(row) for row in rows]
 
     @staticmethod

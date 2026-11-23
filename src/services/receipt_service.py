@@ -15,6 +15,8 @@ from fastapi import HTTPException, status
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
+from src.helpers.pagination import build_pagination_envelope
+from src.helpers.sorting import resolve_raw_sort
 from src.schemas.receipt import (
     CustomerReceiptCreate,
     CustomerReceiptResponse,
@@ -715,6 +717,18 @@ class ReceiptService:
             "allocations_count": len(payload.Allocations),
         }
 
+    ALLOWED_SORT_COLUMNS = {
+        "TransNo": "m.TransNo",
+        "TransDate": "m.TransDate",
+        "CustomerName": "m.MemberName",
+        "ReceiptType": "m.ReceiptType",
+        "BankName": "m.BankName",
+        "PayMode": "m.PayMode",
+        "GrossAmount": "m.TotInvAmt",
+        "NetAmount": "m.NetAmount",
+        "CreatedOn": "m.CreateOn",
+    }
+
     @classmethod
     def get_customer_receipts(
         cls,
@@ -724,12 +738,22 @@ class ReceiptService:
         fin_year: Optional[str] = None,
         limit: int = 50,
         offset: int = 0,
+        page: Optional[int] = None,
+        page_size: Optional[int] = None,
+        sort_by: Optional[str] = None,
+        sort_order: Optional[str] = "desc",
+        fetch_all: bool = False,
     ) -> Dict[str, Any]:
         """
-        Lists customer receipts with search, customer filter, and pagination.
+        Lists customer receipts with search, customer filter, pagination and dynamic sorting.
+        Supports both limit/offset and page/page_size seamlessly.
         """
+        calc_page = page if page and page > 0 else ((offset // limit) + 1 if limit > 0 else 1)
+        calc_limit = page_size if page_size and page_size > 0 else limit
+        calc_offset = (calc_page - 1) * calc_limit if page else offset
+
         where_clauses = ["ISNULL(m.Status, '') <> 'Delete'"]
-        params = {"limit": limit, "offset": offset}
+        params = {"limit": calc_limit, "offset": calc_offset}
 
         if customer_code:
             where_clauses.append("(m.MemberName LIKE :cust OR m.BankGLCode = :cust)")
@@ -754,28 +778,63 @@ class ReceiptService:
         count_sql = text(f"SELECT COUNT(*) FROM dbo.Acc_Receipts_Main m WHERE {where_sql}")
         total_count = db.execute(count_sql, params).scalar() or 0
 
-        list_sql = text(f"""
-            SELECT
-                m.TransNo,
-                m.TransDate,
-                m.MemberName AS CustomerName,
-                m.ReceiptType,
-                m.BankName,
-                m.BankGLCode AS DepositGLCode,
-                m.PayMode,
-                m.RefNo,
-                ISNULL(m.TotInvAmt, m.NetAmount) AS GrossAmount,
-                ISNULL(m.TotTDSAmt, 0.0) AS TDSAmount,
-                ISNULL(m.NetAmount, 0.0) AS NetAmount,
-                m.Remarks,
-                m.Status,
-                m.CreateOn AS CreatedOn,
-                m.FinYearVal
-            FROM dbo.Acc_Receipts_Main m
-            WHERE {where_sql}
-            ORDER BY m.TransDate DESC, m.TransNo DESC
-            OFFSET :offset ROWS FETCH NEXT :limit ROWS ONLY
-        """)
+        sort_col, sort_dir = resolve_raw_sort(
+            sort_by=sort_by,
+            sort_order=sort_order,
+            allowed_sort_columns=cls.ALLOWED_SORT_COLUMNS,
+            default_column="m.TransDate",
+            default_order="DESC",
+        )
+
+        order_by_clause = f"{sort_col} {sort_dir}"
+        if "transno" not in sort_col.lower():
+            order_by_clause += ", m.TransNo DESC"
+
+        if fetch_all or calc_limit <= 0:
+            list_sql = text(f"""
+                SELECT
+                    m.TransNo,
+                    m.TransDate,
+                    m.MemberName AS CustomerName,
+                    m.ReceiptType,
+                    m.BankName,
+                    m.BankGLCode AS DepositGLCode,
+                    m.PayMode,
+                    m.RefNo,
+                    ISNULL(m.TotInvAmt, m.NetAmount) AS GrossAmount,
+                    ISNULL(m.TotTDSAmt, 0.0) AS TDSAmount,
+                    ISNULL(m.NetAmount, 0.0) AS NetAmount,
+                    m.Remarks,
+                    m.Status,
+                    m.CreateOn AS CreatedOn,
+                    m.FinYearVal
+                FROM dbo.Acc_Receipts_Main m
+                WHERE {where_sql}
+                ORDER BY {order_by_clause}
+            """)
+        else:
+            list_sql = text(f"""
+                SELECT
+                    m.TransNo,
+                    m.TransDate,
+                    m.MemberName AS CustomerName,
+                    m.ReceiptType,
+                    m.BankName,
+                    m.BankGLCode AS DepositGLCode,
+                    m.PayMode,
+                    m.RefNo,
+                    ISNULL(m.TotInvAmt, m.NetAmount) AS GrossAmount,
+                    ISNULL(m.TotTDSAmt, 0.0) AS TDSAmount,
+                    ISNULL(m.NetAmount, 0.0) AS NetAmount,
+                    m.Remarks,
+                    m.Status,
+                    m.CreateOn AS CreatedOn,
+                    m.FinYearVal
+                FROM dbo.Acc_Receipts_Main m
+                WHERE {where_sql}
+                ORDER BY {order_by_clause}
+                OFFSET :offset ROWS FETCH NEXT :limit ROWS ONLY
+            """)
 
         items = [dict(r) for r in db.execute(list_sql, params).mappings().all()]
 
@@ -785,12 +844,15 @@ class ReceiptService:
             item["TDSAmount"] = _to_float(item.get("TDSAmount"))
             item["NetAmount"] = _to_float(item.get("NetAmount"))
 
-        return {
-            "total": total_count,
-            "items": items,
-            "limit": limit,
-            "offset": offset,
-        }
+        envelope = build_pagination_envelope(
+            records=items,
+            total_records=total_count,
+            page=calc_page,
+            page_size=calc_limit,
+        )
+        envelope["limit"] = calc_limit
+        envelope["offset"] = calc_offset
+        return envelope
 
     @classmethod
     def get_receipt_details(cls, db: Session, trans_no: str) -> Dict[str, Any]:

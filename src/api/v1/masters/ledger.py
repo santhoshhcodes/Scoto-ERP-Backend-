@@ -18,12 +18,23 @@ router = APIRouter(
 def read_ledgers(
     search: Optional[str] = Query(default=None),
     ledger_type: Optional[str] = Query(default=None),
+    page: Optional[int] = Query(default=None, ge=1, description="Page number (1-based)"),
+    page_size: Optional[int] = Query(default=None, ge=1, le=500, description="Items per page"),
+    sort_by: Optional[str] = Query(default=None, description="Column to sort by"),
+    sort_order: Optional[str] = Query(default="asc", description="Sort direction ('asc' or 'desc')"),
+    all: bool = Query(default=False, description="When True, fetch all records"),
     db: Session = Depends(get_mssql_session("db2")),
 ):
+    fetch_all = all or (page is None and page_size is None)
     return ledger_services.get_ledgers(
         db=db,
         search=search,
         ledger_type=ledger_type,
+        page=page or 1,
+        page_size=page_size or 20,
+        sort_by=sort_by,
+        sort_order=sort_order,
+        fetch_all=fetch_all,
     )
 
 

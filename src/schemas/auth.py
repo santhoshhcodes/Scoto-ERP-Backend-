@@ -7,6 +7,8 @@ class LoginRequest(BaseModel):
     company_code: str
     location_code: str
     fin_year_code: str
+    device_id: Optional[str] = None
+    browser_agent: Optional[str] = None
 
 class UserProfile(BaseModel):
     user_id: str
@@ -22,9 +24,12 @@ class UserProfile(BaseModel):
     fin_year: str
 
 class LoginResponse(BaseModel):
-    access_token: str
-    token_type: str = "bearer"
-    user: UserProfile
+    access_token: Optional[str] = None
+    token_type: Optional[str] = "bearer"
+    user: Optional[UserProfile] = None
+    requires_2fa: bool = False
+    email_masked: Optional[str] = None
+    message: Optional[str] = None
 
 class DropdownOption(BaseModel):
     id: str
@@ -34,3 +39,74 @@ class AuthMetaResponse(BaseModel):
     companies: List[DropdownOption]
     locations: List[DropdownOption]
     financial_years: List[DropdownOption]
+
+class ForgotPasswordRequest(BaseModel):
+    user_id: str
+    company_code: str
+    location_code: str
+
+class ForgotPasswordResponse(BaseModel):
+    status: str = "success"
+    message: str
+    email_masked: str
+
+class VerifyOtpRequest(BaseModel):
+    user_id: str
+    company_code: str
+    location_code: str
+    otp_code: str
+
+class VerifyOtpResponse(BaseModel):
+    status: str = "success"
+    message: str
+    verified: bool
+
+class ResetPasswordRequest(BaseModel):
+    user_id: str
+    company_code: str
+    location_code: str
+    otp_code: str
+    new_password: str
+
+class ResetPasswordResponse(BaseModel):
+    status: str = "success"
+    message: str
+
+class ActivateAccountRequest(BaseModel):
+    user_id: str
+    company_code: str
+    location_code: str
+    otp_code: str
+    new_password: str
+
+class VerifyDeviceOtpRequest(BaseModel):
+    user_id: str
+    company_code: str
+    location_code: str
+    fin_year_code: str
+    otp_code: str
+    device_id: str
+    browser_agent: Optional[str] = None
+
+class ChangePasswordRequest(BaseModel):
+    user_id: str
+    company_code: str
+    location_code: str
+    current_password: str
+    new_password: str
+
+class ChangePasswordResponse(BaseModel):
+    status: str = "success"
+    message: str
+
+class FirstTimeActivateRequest(BaseModel):
+    user_id: str
+    company_code: str
+    location_code: str
+
+class FirstTimeActivateResponse(BaseModel):
+    status: str = "success"
+    message: str
+    email_masked: str
+
+

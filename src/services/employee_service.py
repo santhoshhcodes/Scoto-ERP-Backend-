@@ -1,11 +1,12 @@
 from datetime import date, datetime
 from decimal import Decimal
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, List
 
 from fastapi import HTTPException, status
-from sqlalchemy import or_, select
+from sqlalchemy import or_, select, func
 from sqlalchemy.orm import Session
 
+from src.helpers.pagination import build_pagination_envelope
 from src.models.employee import Employee
 from src.schemas.employee import EmployeeCreate, EmployeeUpdate
 
@@ -32,6 +33,18 @@ AUTHORIZED_ROLES = {
 }
 
 
+ALLOWED_EMPLOYEE_SORTS = {
+    "EmployeeId": Employee.EmployeeId,
+    "EmployeeCode": Employee.EmployeeCode,
+    "FirstName": Employee.FirstName,
+    "LastName": Employee.LastName,
+    "DepartmentName": Employee.DepartmentName,
+    "DesignationName": Employee.DesignationName,
+    "DateOfJoining": Employee.DateOfJoining,
+    "IsActive": Employee.IsActive,
+}
+
+
 def list_employees(
     db: Session,
     search: Optional[str] = None,
@@ -39,6 +52,11 @@ def list_employees(
     source: Optional[str] = None,
     skip: int = 0,
     limit: int = 100,
+    page: Optional[int] = None,
+    page_size: Optional[int] = None,
+    sort_by: Optional[str] = None,
+    sort_order: Optional[str] = "desc",
+    fetch_all: bool = False,
 ):
     stmt = select(Employee)
 
@@ -72,9 +90,41 @@ def list_employees(
         elif source_val == "MANUAL":
             stmt = stmt.where(Employee.EmployeeSource == "MANUAL")
 
-    stmt = stmt.order_by(Employee.EmployeeId.desc())
-    stmt = stmt.offset(skip).limit(limit)
+    # Sorting
+    sort_col = ALLOWED_EMPLOYEE_SORTS.get(sort_by) if sort_by else Employee.EmployeeId
+    if sort_col is None:
+        sort_col = Employee.EmployeeId
 
+    if str(sort_order or "").lower() == "asc":
+        stmt = stmt.order_by(sort_col.asc())
+    else:
+        stmt = stmt.order_by(sort_col.desc())
+
+    # If page was provided, return paginated envelope; otherwise return list for legacy callers
+    if page is not None or page_size is not None or fetch_all:
+        total_records = db.scalar(select(func.count()).select_from(stmt.subquery())) or 0
+        calc_page = page if page and page > 0 else 1
+        calc_size = page_size if page_size and page_size > 0 else limit
+
+        if fetch_all or calc_size <= 0:
+            records = list(db.scalars(stmt).all())
+            return build_pagination_envelope(
+                records=records,
+                total_records=total_records,
+                page=1,
+                page_size=max(1, total_records),
+            )
+
+        calc_offset = (calc_page - 1) * calc_size
+        records = list(db.scalars(stmt.offset(calc_offset).limit(calc_size)).all())
+        return build_pagination_envelope(
+            records=records,
+            total_records=total_records,
+            page=calc_page,
+            page_size=calc_size,
+        )
+
+    stmt = stmt.offset(skip).limit(limit)
     return list(db.scalars(stmt).all())
 
 

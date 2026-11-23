@@ -25,6 +25,11 @@ def list_customer_receipts(
     fin_year: Optional[str] = Query(default=None, description="Financial Year, e.g. '2026_2027' or 'ALL'"),
     limit: int = Query(default=50, ge=1, le=200),
     offset: int = Query(default=0, ge=0),
+    page: Optional[int] = Query(default=None, ge=1, description="Page number (1-based)"),
+    page_size: Optional[int] = Query(default=None, ge=1, le=500, description="Items per page"),
+    sort_by: Optional[str] = Query(default=None, description="Column to sort by"),
+    sort_order: Optional[str] = Query(default="desc", description="Sort direction ('asc' or 'desc')"),
+    all: bool = Query(default=False, description="When True, fetch all records"),
     db: Session = Depends(get_mssql_session("db2")),
 ):
     """
@@ -37,6 +42,11 @@ def list_customer_receipts(
         fin_year=fin_year,
         limit=limit,
         offset=offset,
+        page=page,
+        page_size=page_size,
+        sort_by=sort_by,
+        sort_order=sort_order,
+        fetch_all=all,
     )
 
 

@@ -1,9 +1,12 @@
 from datetime import datetime
-from typing import Optional
+from typing import Optional, Dict, Any, List
 
 from fastapi import HTTPException, status
 from sqlalchemy import text
 from sqlalchemy.orm import Session
+
+from src.helpers.pagination import paginate_raw_sql
+from src.helpers.sorting import resolve_raw_sort
 
 
 def ensure_sales_invoice_tables_exist(db: Session) -> None:
@@ -159,11 +162,36 @@ def _insert_serials(db: Session, trans_no: str, payload) -> None:
         })
 
 
+ALLOWED_SALES_INVOICE_SORTS = {
+    "TransNo": "TransNo",
+    "TransDate": "TransDate",
+    "InvoiceNo": "InvoiceNo",
+    "InvoiceDate": "InvoiceDate",
+    "CustomerCode": "CustomerCode",
+    "CustomerName": "CustomerName",
+    "TotalQty": "TotalQty",
+    "TotalAmount": "TotalAmount",
+    "FinalNetAmount": "NetAmount",
+    "NetAmount": "NetAmount",
+    "Approval_Status": "Approval_Status",
+    "ApprovalStatus": "Approval_Status",
+    "CreatedOn": "CreateOn",
+}
+
+
 def get_sales_invoices(
-    db: Session, search: Optional[str] = None, approval_status: Optional[str] = None,
-    company_code: Optional[str] = "SCT", location_code: Optional[str] = "UNIT I",
+    db: Session,
+    search: Optional[str] = None,
+    approval_status: Optional[str] = None,
+    company_code: Optional[str] = "SCT",
+    location_code: Optional[str] = "UNIT I",
     fin_year: Optional[str] = None,
-):
+    page: int = 1,
+    page_size: int = 20,
+    sort_by: Optional[str] = None,
+    sort_order: Optional[str] = "desc",
+    fetch_all: bool = False,
+) -> Dict[str, Any]:
     sql = """
         SELECT TransNo, FinYearVal, FinYearCode, TransDate, InvoiceNo, InvoiceDate, CustomerCode, CustomerName,
                GRN, Remarks, TotalQty, TotalItemAmount, TotalCGSTAmount, TotalSGSTAmount,
@@ -239,12 +267,29 @@ def get_sales_invoices(
         else:
 
             sql += " AND (FinYearVal = :fin_year OR FinYearCode = :fin_year)"
-
             params["fin_year"] = fin_year
-    sql += " ORDER BY TransNo DESC"
-    rows = db.execute(text(sql), params).mappings().all()
+
+    sort_col, sort_dir = resolve_raw_sort(
+        sort_by=sort_by,
+        sort_order=sort_order,
+        allowed_sort_columns=ALLOWED_SALES_INVOICE_SORTS,
+        default_column="TransNo",
+        default_order="DESC",
+    )
+
+    paged_res = paginate_raw_sql(
+        db=db,
+        base_query=sql,
+        params=params,
+        page=page,
+        page_size=page_size,
+        sort_column=sort_col,
+        sort_order=sort_dir,
+        fetch_all=fetch_all,
+    )
+
     data = []
-    for row in rows:
+    for row in paged_res["data"]:
         item = dict(row)
         item["items_count"] = db.execute(text("""
             SELECT COUNT(*) FROM Acc_Sales_Inv_Sub
@@ -288,7 +333,10 @@ def get_sales_invoices(
         except Exception:
             pass
 
-    return {"status": "success", "data": data, "total": len(data)}
+    paged_res["data"] = data
+    paged_res["items"] = data
+    paged_res["status"] = "success"
+    return paged_res
 
 
 def get_available_proforma_invoices(db: Session):

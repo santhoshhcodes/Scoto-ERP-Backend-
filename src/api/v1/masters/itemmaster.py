@@ -18,12 +18,23 @@ router = APIRouter(
 def read_items(
     search: Optional[str] = Query(default=None),
     product_type: Optional[str] = Query(default=None),
+    page: Optional[int] = Query(default=None, ge=1, description="Page number (1-based)"),
+    page_size: Optional[int] = Query(default=None, ge=1, le=500, description="Items per page"),
+    sort_by: Optional[str] = Query(default=None, description="Column to sort by"),
+    sort_order: Optional[str] = Query(default="desc", description="Sort direction ('asc' or 'desc')"),
+    all: bool = Query(default=False, description="When True, fetch all records"),
     db: Session = Depends(get_mssql_session("db2")),
 ):
+    fetch_all = all or (page is None and page_size is None)
     return itemmaster_services.get_items(
         db=db,
         search=search,
         product_type=product_type,
+        page=page or 1,
+        page_size=page_size or 20,
+        sort_by=sort_by,
+        sort_order=sort_order,
+        fetch_all=fetch_all,
     )
 
 

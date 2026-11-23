@@ -1,17 +1,37 @@
 
 from urllib.parse import unquote
+from typing import Optional, Dict, Any, List
 
 from fastapi import HTTPException
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
+from src.helpers.pagination import paginate_raw_sql
+from src.helpers.sorting import resolve_raw_sort
 from src.schemas.master import ItemCreate, ItemUpdate
+
+ALLOWED_ITEM_SORTS = {
+    "ItemCode": "ItemCode",
+    "ProductType": "ProductType",
+    "ItemDescription": "ItemDescription",
+    "ItemType": "ItemType",
+    "HSNCode": "HSNCode",
+    "UOM": "UOM",
+    "SerialNo": "SerialNo",
+    "Status": "Status",
+    "CreatedOn": "CreatedOn",
+}
 
 
 def get_items(
     db: Session,
-    search: str | None = None,
-    product_type: str | None = None,
+    search: Optional[str] = None,
+    product_type: Optional[str] = None,
+    page: int = 1,
+    page_size: int = 20,
+    sort_by: Optional[str] = None,
+    sort_order: Optional[str] = "desc",
+    fetch_all: bool = False,
 ):
     query = """
         SELECT
@@ -43,18 +63,24 @@ def get_items(
         """
         params["search"] = f"%{search.strip()}%"
 
-    query += " ORDER BY CreatedOn DESC"
+    sort_col, sort_dir = resolve_raw_sort(
+        sort_by=sort_by,
+        sort_order=sort_order,
+        allowed_sort_columns=ALLOWED_ITEM_SORTS,
+        default_column="CreatedOn",
+        default_order="DESC",
+    )
 
-    result = db.execute(
-        text(query),
-        params,
-    ).mappings().all()
-
-    return {
-        "success": True,
-        "count": len(result),
-        "data": [dict(row) for row in result],
-    }
+    return paginate_raw_sql(
+        db=db,
+        base_query=query,
+        params=params,
+        page=page,
+        page_size=page_size,
+        sort_column=sort_col,
+        sort_order=sort_dir,
+        fetch_all=fetch_all,
+    )
 
 
 def create_item(db: Session, payload: ItemCreate):

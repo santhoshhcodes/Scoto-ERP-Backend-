@@ -5,6 +5,8 @@ from fastapi import HTTPException
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
+from src.helpers.pagination import paginate_raw_sql
+from src.helpers.sorting import resolve_raw_sort
 from src.schemas.transaction import (
     ProformaCreate,
     ProformaUpdate,
@@ -141,6 +143,20 @@ class ProformaInvoiceService:
             FROM Acc_Proforma_Inv_Main
         """
 
+    ALLOWED_SORT_COLUMNS = {
+        "TransNo": "TransNo",
+        "TransDate": "TransDate",
+        "CustomerName": "CustomerName",
+        "CustomerCode": "CustomerCode",
+        "QuotationNo": "QuotationNo",
+        "TotalQty": "TotalQty",
+        "TotalAmount": "TotalAmount",
+        "NetAmount": "NetAmount",
+        "ApprovalStatus": "ApprovalStatus",
+        "CreateOn": "CreateOn",
+        "Status": "Status",
+    }
+
     @classmethod
     def get_all(
         cls,
@@ -148,7 +164,12 @@ class ProformaInvoiceService:
         search: Optional[str] = None,
         approval_status: Optional[str] = None,
         fin_year: Optional[str] = None,
-    ) -> List[Dict[str, Any]]:
+        page: int = 1,
+        page_size: int = 20,
+        sort_by: Optional[str] = None,
+        sort_order: Optional[str] = "desc",
+        fetch_all: bool = False,
+    ) -> Dict[str, Any]:
         cls.ensure_tables_exist(db)
 
         query = cls._header_select() + """
@@ -214,12 +235,27 @@ class ProformaInvoiceService:
                 """
                 params["fin_year"] = fin_year
 
-        query += " ORDER BY CreateOn DESC"
+        sort_col, sort_dir = resolve_raw_sort(
+            sort_by=sort_by,
+            sort_order=sort_order,
+            allowed_sort_columns=cls.ALLOWED_SORT_COLUMNS,
+            default_column="CreateOn",
+            default_order="DESC",
+        )
 
-        rows = db.execute(text(query), params).mappings().all()
+        paged_res = paginate_raw_sql(
+            db=db,
+            base_query=query,
+            params=params,
+            page=page,
+            page_size=page_size,
+            sort_column=sort_col,
+            sort_order=sort_dir,
+            fetch_all=fetch_all,
+        )
+
         invoices = []
-
-        for row in rows:
+        for row in paged_res["data"]:
             invoice = dict(row)
             invoice["Items"] = cls._get_items(
                 db,
@@ -227,7 +263,9 @@ class ProformaInvoiceService:
             )
             invoices.append(invoice)
 
-        return invoices
+        paged_res["data"] = invoices
+        paged_res["items"] = invoices
+        return paged_res
 
     @classmethod
     def get_by_no(

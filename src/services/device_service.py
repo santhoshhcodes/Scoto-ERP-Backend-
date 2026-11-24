@@ -1,6 +1,7 @@
 import json
 import logging
 import os
+import socket
 import subprocess
 from datetime import datetime, timedelta
 from typing import Optional, Dict, Any
@@ -15,6 +16,16 @@ logger = logging.getLogger(__name__)
 
 CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
 DOWNLOADER_SCRIPT = os.path.join(CURRENT_DIR, "device_downloader.ps1")
+
+
+def _can_connect_tcp(host: str, port: int = 4370, timeout: float = 1.0) -> bool:
+    """Fast pre-flight test to check whether TCP port 4370 is open and reachable."""
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.settimeout(timeout)
+            return s.connect_ex((host, port)) == 0
+    except Exception:
+        return False
 
 
 class DeviceService:
@@ -271,14 +282,42 @@ class DeviceService:
 
         # Always queue ADMS command so devices communicating via push receive the sync instruction
         if sn:
-            queue_adms_command(sn, "DATA QUERY ATTLOG")
+            queue_adms_command(sn, "SET OPTION Stamp=0")
             queue_adms_command(sn, "CHECK")
+            queue_adms_command(sn, "LOG")
 
         if not ip_address:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="The selected biometric device has no IP address.",
             )
+
+        # Pre-check if local TCP port 4370 is directly reachable from this host.
+        # If the device is across subnets/WAN, immediately trigger ADMS sync without wasting time or failing.
+        can_reach_tcp = _can_connect_tcp(ip_address, 4370, timeout=1.0)
+        if not can_reach_tcp and sn:
+            logger.info(
+                "Direct TCP 4370 unreachable at %s. Fast-fallback to ADMS push sync for %s (%s).",
+                ip_address,
+                dev_name,
+                sn,
+            )
+            return {
+                "status": "success",
+                "device_id": dev_id,
+                "device_name": dev_name,
+                "ip_address": ip_address,
+                "total_retrieved": 0,
+                "new_inserted": 0,
+                "duplicates_skipped": 0,
+                "employees_created": 0,
+                "last_log_download_date": (
+                    last_download.strftime("%Y-%m-%d %H:%M:%S")
+                    if last_download
+                    else None
+                ),
+                "message": f"Biometric sync command dispatched for {dev_name} ({sn}) via ADMS Push.",
+            }
 
         # 2. Download cutoff.
         if last_download and last_download > datetime(2020, 1, 1):
@@ -438,6 +477,28 @@ class DeviceService:
             ) from exc
 
         if isinstance(parsed, dict) and "error" in parsed:
+            if sn:
+                logger.info(
+                    "TCP 4370 returned error: %s. Falling back to ADMS sync for %s.",
+                    parsed["error"],
+                    sn,
+                )
+                return {
+                    "status": "success",
+                    "device_id": dev_id,
+                    "device_name": dev_name,
+                    "ip_address": ip_address,
+                    "total_retrieved": 0,
+                    "new_inserted": 0,
+                    "duplicates_skipped": 0,
+                    "employees_created": 0,
+                    "last_log_download_date": (
+                        last_download.strftime("%Y-%m-%d %H:%M:%S")
+                        if last_download
+                        else None
+                    ),
+                    "message": f"Biometric sync command queued for {dev_name} ({sn}) via ADMS Push.",
+                }
             raise HTTPException(
                 status_code=status.HTTP_502_BAD_GATEWAY,
                 detail=f"Biometric device error: {parsed['error']}",

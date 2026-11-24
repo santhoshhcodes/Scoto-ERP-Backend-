@@ -35,3 +35,19 @@ def pop_adms_command(device_sn: str) -> Optional[Dict[str, Any]]:
     if "*" in _device_command_queues and _device_command_queues["*"]:
         return _device_command_queues["*"].pop(0)
     return None
+
+
+def pop_all_adms_commands(device_sn: str) -> List[Dict[str, Any]]:
+    """
+    Retrieve and pop all pending commands for the device.
+    Returned commands are formatted into a multi-line batch response.
+    """
+    sn_key = device_sn.strip().upper() if device_sn else ""
+    cmds: List[Dict[str, Any]] = []
+    if sn_key and sn_key in _device_command_queues and _device_command_queues[sn_key]:
+        cmds.extend(_device_command_queues[sn_key])
+        _device_command_queues[sn_key] = []
+    if "*" in _device_command_queues and _device_command_queues["*"]:
+        cmds.extend(_device_command_queues["*"])
+        _device_command_queues["*"] = []
+    return cmds

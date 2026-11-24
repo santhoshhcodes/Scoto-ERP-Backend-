@@ -8,7 +8,7 @@ from sqlalchemy.orm import Session
 
 from src.api.deps import get_mssql_session
 from src.services.device_service import DeviceService
-from src.services.adms_queue import pop_adms_command, queue_adms_command
+from src.services.adms_queue import pop_adms_command, pop_all_adms_commands, queue_adms_command
 
 logger = logging.getLogger(__name__)
 
@@ -202,14 +202,15 @@ async def iclock_querydata(
 def iclock_getrequest(request: Request):
     """
     Device command poll endpoint.
-    If a sync command is queued for this device, deliver it; otherwise reply OK.
+    If sync commands are queued for this device, deliver them in batch.
     """
     qp = request.query_params
     sn = (qp.get("SN") or qp.get("sn") or "").strip()
-    cmd = pop_adms_command(sn)
-    if cmd:
-        logger.info("Dispatching ADMS command C:%s:%s to %s", cmd["id"], cmd["command"], sn)
-        return Response(content=f"C:{cmd['id']}:{cmd['command']}\n", media_type="text/plain")
+    cmds = pop_all_adms_commands(sn)
+    if cmds:
+        body = "".join(f"C:{c['id']}:{c['command']}\n" for c in cmds)
+        logger.info("Dispatching %d ADMS command(s) to device %s:\n%s", len(cmds), sn, body.strip())
+        return Response(content=body, media_type="text/plain")
     return Response(content="OK\n", media_type="text/plain")
 
 

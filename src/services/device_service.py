@@ -9,6 +9,8 @@ from fastapi import HTTPException, status
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
+from src.services.adms_queue import queue_adms_command
+
 logger = logging.getLogger(__name__)
 
 CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -265,6 +267,12 @@ class DeviceService:
         ip_address = (device.IpAddress or "").strip()
         comm_key = str(device.CommKey or "000000").strip()
         last_download = device.LastLogDownloadDate
+        sn = str(device.SerialNumber or "").strip()
+
+        # Always queue ADMS command so devices communicating via push receive the sync instruction
+        if sn:
+            queue_adms_command(sn, "DATA QUERY ATTLOG")
+            queue_adms_command(sn, "CHECK")
 
         if not ip_address:
             raise HTTPException(
@@ -315,17 +323,60 @@ class DeviceService:
                     cmd,
                     capture_output=True,
                     text=True,
-                    timeout=45,
+                    timeout=15,
                 )
             except subprocess.TimeoutExpired as exc:
+                if sn:
+                    logger.warning(
+                        "Direct TCP 4370 download timed out for %s. Fallback to ADMS push sync.",
+                        sn,
+                    )
+                    return {
+                        "status": "success",
+                        "device_id": dev_id,
+                        "device_name": dev_name,
+                        "ip_address": ip_address,
+                        "total_retrieved": 0,
+                        "new_inserted": 0,
+                        "duplicates_skipped": 0,
+                        "employees_created": 0,
+                        "last_log_download_date": (
+                            last_download.strftime("%Y-%m-%d %H:%M:%S")
+                            if last_download
+                            else None
+                        ),
+                        "message": f"Biometric sync command queued for {dev_name} ({sn}) via ADMS Push.",
+                    }
                 raise HTTPException(
                     status_code=status.HTTP_504_GATEWAY_TIMEOUT,
                     detail=(
                         f"Connection to biometric device at {ip_address} "
-                        "timed out after 45 seconds."
+                        "timed out after 15 seconds."
                     ),
                 ) from exc
             except Exception as exc:
+                if sn:
+                    logger.warning(
+                        "Direct TCP 4370 download failed for %s (%s). Fallback to ADMS push sync.",
+                        sn,
+                        exc,
+                    )
+                    return {
+                        "status": "success",
+                        "device_id": dev_id,
+                        "device_name": dev_name,
+                        "ip_address": ip_address,
+                        "total_retrieved": 0,
+                        "new_inserted": 0,
+                        "duplicates_skipped": 0,
+                        "employees_created": 0,
+                        "last_log_download_date": (
+                            last_download.strftime("%Y-%m-%d %H:%M:%S")
+                            if last_download
+                            else None
+                        ),
+                        "message": f"Biometric sync command queued for {dev_name} ({sn}) via ADMS Push.",
+                    }
                 raise HTTPException(
                     status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                     detail=f"Failed to execute downloader script: {exc}",
@@ -335,7 +386,7 @@ class DeviceService:
             if "Failed to create zkemkeeper COM object" not in res.stdout:
                 break
 
-        stdout_clean = res.stdout.strip()
+        stdout_clean = (res.stdout or "").strip() if res else ""
 
         start_idx = next(
             (
@@ -346,8 +397,30 @@ class DeviceService:
         )
 
         if start_idx == -1:
+            if sn:
+                logger.info(
+                    "TCP 4370 returned no JSON for %s. Device is managed via ADMS push sync.",
+                    sn,
+                )
+                return {
+                    "status": "success",
+                    "device_id": dev_id,
+                    "device_name": dev_name,
+                    "ip_address": ip_address,
+                    "total_retrieved": 0,
+                    "new_inserted": 0,
+                    "duplicates_skipped": 0,
+                    "employees_created": 0,
+                    "last_log_download_date": (
+                        last_download.strftime("%Y-%m-%d %H:%M:%S")
+                        if last_download
+                        else None
+                    ),
+                    "message": f"Biometric sync command queued for {dev_name} ({sn}) via ADMS Push.",
+                }
+
             err_msg = (
-                res.stderr.strip()
+                (res.stderr or "").strip()
                 or stdout_clean
                 or "Unknown downloader error"
             )

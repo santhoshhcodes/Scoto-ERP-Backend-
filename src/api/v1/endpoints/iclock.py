@@ -8,6 +8,7 @@ from sqlalchemy.orm import Session
 
 from src.api.deps import get_mssql_session
 from src.services.device_service import DeviceService
+from src.services.adms_queue import pop_adms_command, queue_adms_command
 
 logger = logging.getLogger(__name__)
 
@@ -127,7 +128,7 @@ async def iclock_cdata(
             logger.info("Handshake received from ADMS device SN: %s", sn)
             response_text = (
                 f"GET OPTION FROM: {sn}\n"
-                f"Stamp=9999\n"
+                f"Stamp=0\n"
                 f"OpStamp=0\n"
                 f"PhotoStamp=0\n"
                 f"ErrorDelay=60\n"
@@ -168,17 +169,58 @@ async def iclock_cdata(
     return Response(content="OK\n", media_type="text/plain")
 
 
+@router.api_route("/querydata", methods=["GET", "POST"])
+@router.api_route("/querydata.aspx", methods=["GET", "POST"])
+async def iclock_querydata(
+    request: Request,
+    db1: Session = Depends(get_mssql_session("db1")),
+    db2: Session = Depends(get_mssql_session("db2")),
+):
+    """Handle query data responses pushed back from device."""
+    qp = request.query_params
+    sn = qp.get("SN") or qp.get("sn") or ""
+    raw_body = (await request.body()).decode("utf-8", errors="ignore")
+    punches = parse_adms_attlog(raw_body)
+    if punches:
+        try:
+            DeviceService.process_adms_punch_batch(
+                db1=db1,
+                db2=db2,
+                device_sn=sn,
+                punches=punches,
+            )
+            logger.info("Successfully processed %d querydata punches for device %s", len(punches), sn)
+            return Response(content=f"OK: {len(punches)}\n", media_type="text/plain")
+        except Exception as e:
+            logger.error("Failed to store querydata punches: %s", e)
+            return Response(content="OK\n", media_type="text/plain")
+    return Response(content="OK\n", media_type="text/plain")
+
+
 @router.api_route("/getrequest", methods=["GET", "POST"])
 @router.api_route("/getrequest.aspx", methods=["GET", "POST"])
 def iclock_getrequest(request: Request):
-    """Device command poll endpoint."""
+    """
+    Device command poll endpoint.
+    If a sync command is queued for this device, deliver it; otherwise reply OK.
+    """
+    qp = request.query_params
+    sn = (qp.get("SN") or qp.get("sn") or "").strip()
+    cmd = pop_adms_command(sn)
+    if cmd:
+        logger.info("Dispatching ADMS command C:%s:%s to %s", cmd["id"], cmd["command"], sn)
+        return Response(content=f"C:{cmd['id']}:{cmd['command']}\n", media_type="text/plain")
     return Response(content="OK\n", media_type="text/plain")
 
 
 @router.api_route("/devicecmd", methods=["GET", "POST"])
 @router.api_route("/devicecmd.aspx", methods=["GET", "POST"])
-def iclock_devicecmd(request: Request):
+async def iclock_devicecmd(request: Request):
     """Device command acknowledgement endpoint."""
+    qp = request.query_params
+    sn = qp.get("SN") or qp.get("sn") or ""
+    raw_body = (await request.body()).decode("utf-8", errors="ignore")
+    logger.info("Device %s acknowledged command: %s (params: %s)", sn, raw_body.strip(), dict(qp))
     return Response(content="OK\n", media_type="text/plain")
 
 

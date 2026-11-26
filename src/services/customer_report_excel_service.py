@@ -116,29 +116,56 @@ class CustomerReportExcelService:
         client_code: str,
         fin_year: str = "ALL",
         tab: str = "ALL",
+        from_date: Optional[str] = None,
+        to_date: Optional[str] = None,
+        from_month: Optional[str] = None,
+        to_month: Optional[str] = None,
     ) -> io.BytesIO:
         """
         Generates an Executive Customer Dossier Excel workbook strictly containing TWO sheets:
           1. Statement of Account (Detailed Ledger of Invoices & Receipts with GST & TDS)
           2. Executive Summary (KPI Snapshot & Invoice Settlement Matrix)
         """
-        dossier = CustomerReportService.get_customer_dossier(db, client_code=client_code, fin_year=fin_year)
+        dossier = CustomerReportService.get_customer_dossier(
+            db,
+            client_code=client_code,
+            fin_year=fin_year,
+            from_date=from_date,
+            to_date=to_date,
+            from_month=from_month,
+            to_month=to_month,
+        )
         customer = dossier.get("customer_info", {})
         kpis = dossier.get("kpis", {})
         invoices_breakdown = dossier.get("invoices_breakdown", [])
         running_ledger = dossier.get("running_ledger", [])
         fy_display = dossier.get("selected_fin_year") or fin_year or "ALL"
+        period_display = dossier.get("period_display") or f"FY {fy_display}"
 
         wb = openpyxl.Workbook()
 
         # Sheet 1: Statement of Account
         ws1 = wb.active
         ws1.title = "Statement of Account"
-        cls._build_statement_of_account_sheet(ws1, customer=customer, kpis=kpis, ledger=running_ledger, fin_year=fy_display)
+        cls._build_statement_of_account_sheet(
+            ws1,
+            customer=customer,
+            kpis=kpis,
+            ledger=running_ledger,
+            fin_year=fy_display,
+            period_display=period_display,
+        )
 
         # Sheet 2: Executive Summary
         ws2 = wb.create_sheet(title="Executive Summary")
-        cls._build_executive_summary_sheet(ws2, customer=customer, kpis=kpis, invoices=invoices_breakdown, fin_year=fy_display)
+        cls._build_executive_summary_sheet(
+            ws2,
+            customer=customer,
+            kpis=kpis,
+            invoices=invoices_breakdown,
+            fin_year=fy_display,
+            period_display=period_display,
+        )
 
         output = io.BytesIO()
         wb.save(output)
@@ -215,26 +242,72 @@ class CustomerReportExcelService:
             ("City & State:", "Ramanathapuram, Coimbatore - 641045, Tamil Nadu, India", font_box_body),
             ("Tax Identifiers:", "GSTIN: 33AAVCS5957L1ZF | PAN: AAVCS5957L", font_box_bold),
             ("Contact Details:", "Phone: +91 422 4355555 | Email: accounts@scoto.in", font_box_body),
-            ("Web / Portal:", "ERP Portal: https://erp.scoto.in | Web: www.scoto.in", font_box_body),
+            ("Website:", "www.scoto.in", font_box_body),
         ]
 
         # Customer details (Right)
-        c_name = customer.get("LedgerName") or customer.get("CustomerName") or "-"
-        c_code = customer.get("LedgerCode") or customer.get("CustomerCode") or "-"
-        c_gst = customer.get("GSTNo") or "-"
-        c_pan = customer.get("PanNo") or "-"
-        c_contact = customer.get("ContectName") or "-"
-        c_phone = customer.get("MobileNo") or "-"
-        c_email = customer.get("MailID") or "-"
+        c_name = (customer.get("LedgerName") or customer.get("CustomerName") or "-").strip()
+        c_code = (customer.get("LedgerCode") or customer.get("CustomerCode") or "-").strip()
 
+        # Clean GST
+        c_gst = (customer.get("GSTNo") or customer.get("GST") or "").strip()
+        if not c_gst or c_gst.upper() in ("NONE", "NULL", "-", "N/A", "NA"):
+            c_gst = "-"
+
+        # Clean PAN (with fallback derivation from 15-character GSTIN if missing)
+        c_pan = (customer.get("PanNo") or customer.get("PAN") or "").strip()
+        if (not c_pan or c_pan.upper() in ("NONE", "NULL", "-", "N/A", "NA")) and c_gst != "-" and len(c_gst) >= 12:
+            cand_pan = c_gst[2:12]
+            if len(cand_pan) == 10 and cand_pan[:5].isalpha():
+                c_pan = cand_pan
+        if not c_pan or c_pan.upper() in ("NONE", "NULL", "-", "N/A", "NA"):
+            c_pan = "-"
+
+        c_contact = (
+            customer.get("ContectName") or
+            customer.get("ContactName") or
+            customer.get("ContactPerson") or
+            ""
+        ).strip()
+        if not c_contact or c_contact.upper() in ("NONE", "NULL", "-", "N/A", "NA"):
+            c_contact = "-"
+
+        c_phone = (
+            customer.get("MobileNo") or
+            customer.get("ContectNo") or
+            customer.get("TelNo") or
+            customer.get("PhoneNo") or
+            customer.get("Mobile") or
+            ""
+        ).strip()
+        if not c_phone or c_phone.upper() in ("NONE", "NULL", "-", "N/A", "NA"):
+            c_phone = "-"
+
+        c_email = (
+            customer.get("MailID") or
+            customer.get("Email") or
+            customer.get("EmailID") or
+            customer.get("Mail") or
+            ""
+        ).strip()
+        if not c_email or c_email.upper() in ("NONE", "NULL", "-", "N/A", "NA"):
+            c_email = "-"
+
+        house_no = (customer.get("HouseNo") or "").strip()
         add1 = (customer.get("Add1") or "").strip()
         add2 = (customer.get("Add2") or "").strip()
+        area = (customer.get("Area") or "").strip()
         city = (customer.get("City") or "").strip()
         state = (customer.get("State") or "").strip()
         pincode = str(customer.get("PinCode") or "").strip()
+        if pincode.upper() in ("NONE", "NULL"):
+            pincode = ""
 
-        addr_line = ", ".join(p for p in (add1, add2) if p) or "-"
-        city_line = ", ".join(p for p in (city, state) if p)
+        addr_parts = [p for p in (house_no, add1, add2, area) if p and p.upper() not in ("NONE", "NULL", "-", "N/A", "NA")]
+        addr_line = ", ".join(addr_parts) or "-"
+
+        city_parts = [p for p in (city, state) if p and p.upper() not in ("NONE", "NULL", "-", "N/A", "NA")]
+        city_line = ", ".join(city_parts)
         if pincode:
             city_line = f"{city_line} - {pincode}" if city_line else f"PIN: {pincode}"
         if not city_line:
@@ -298,9 +371,11 @@ class CustomerReportExcelService:
         kpis: Dict[str, Any],
         ledger: List[Dict[str, Any]],
         fin_year: str,
+        period_display: str = "",
     ):
         """Builds Sheet 1: Detailed Statement of Account with 14 compact columns."""
-        subtitle = f"Financial Period: FY {fin_year} | Statement Generated On: {datetime.now().strftime('%d-%b-%Y %I:%M %p')}"
+        period_label = period_display or (f"FY {fin_year}" if fin_year != "ALL" else "All Financial Years")
+        subtitle = f"Financial Period: {period_label} | Statement Generated On: {datetime.now().strftime('%d-%b-%Y %I:%M %p')}"
         next_row = cls._render_dual_header(
             ws,
             customer=customer,
@@ -310,7 +385,7 @@ class CustomerReportExcelService:
         )
 
         # Section Header
-        sec_cell = ws.cell(row=next_row, column=1, value="DETAILED SALES INVOICES & PAYMENT RECEIPTS LEDGER")
+        sec_cell = ws.cell(row=next_row, column=1, value=f"DETAILED SALES INVOICES & PAYMENT RECEIPTS LEDGER ({period_label})")
         sec_cell.font = font_sec_header
         ws.row_dimensions[next_row].height = 19
         next_row += 1
@@ -477,9 +552,11 @@ class CustomerReportExcelService:
         kpis: Dict[str, Any],
         invoices: List[Dict[str, Any]],
         fin_year: str,
+        period_display: str = "",
     ):
         """Builds Sheet 2: Executive 1-page summary with KPI cards and Invoice Matrix."""
-        subtitle = f"Financial Period: FY {fin_year} | Executive Status Snapshot as of {datetime.now().strftime('%d-%b-%Y')}"
+        period_label = period_display or (f"FY {fin_year}" if fin_year != "ALL" else "All Financial Years")
+        subtitle = f"Financial Period: {period_label} | Executive Status Snapshot as of {datetime.now().strftime('%d-%b-%Y')}"
         next_row = cls._render_dual_header(
             ws,
             customer=customer,
@@ -489,7 +566,7 @@ class CustomerReportExcelService:
         )
 
         # Section: KPI Summary Cards
-        ws.cell(row=next_row, column=1, value="FINANCIAL RECEIVABLES & COLLECTION SNAPSHOT").font = font_sec_header
+        ws.cell(row=next_row, column=1, value=f"FINANCIAL RECEIVABLES & COLLECTION SNAPSHOT ({period_label})").font = font_sec_header
         ws.row_dimensions[next_row].height = 19
         next_row += 1
 

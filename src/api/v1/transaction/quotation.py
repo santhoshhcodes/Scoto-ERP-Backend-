@@ -67,6 +67,40 @@ def get_quotations(
 
 
 # =========================================================
+# NEXT TRANSACTION NUMBER & EXISTENCE CHECK
+# =========================================================
+
+@router.get("/next-trans-no")
+def get_next_quotation_trans_no(
+    fin_year: Optional[str] = Query(default=None),
+    db: Session = Depends(get_mssql_session("db2")),
+):
+    from src.utils.trans_no_helpers import get_fin_year_code
+    next_no = QuotationService.get_next_trans_no(db=db, fin_year=fin_year)
+    return {
+        "success": True,
+        "trans_no": next_no,
+        "fin_year_code": get_fin_year_code(fin_year),
+    }
+
+
+@router.get("/check-trans-no")
+def check_quotation_trans_no(
+    trans_no: str = Query(..., description="Quotation TransNo to check"),
+    exclude_trans_no: Optional[str] = Query(default=None, description="Current TransNo if editing"),
+    db: Session = Depends(get_mssql_session("db2")),
+):
+    exists = QuotationService.check_trans_no_exists(db=db, trans_no=trans_no, exclude_trans_no=exclude_trans_no)
+    return {
+        "success": True,
+        "trans_no": trans_no,
+        "exists": exists,
+        "available": not exists,
+        "message": f"Quotation '{trans_no}' already exists in database." if exists else f"Quotation '{trans_no}' is available.",
+    }
+
+
+# =========================================================
 # REVISION HISTORY & COMPARISON
 # =========================================================
 

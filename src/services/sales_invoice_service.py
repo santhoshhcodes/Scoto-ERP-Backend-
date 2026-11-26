@@ -379,17 +379,22 @@ def get_sales_invoice_by_no(db: Session, trans_no: str):
     return {"status": "success", "data": data}
 
 
+def get_next_trans_no(db: Session, fin_year: Optional[str] = None) -> str:
+    from src.utils.trans_no_helpers import generate_next_trans_no
+    return generate_next_trans_no(db=db, prefix="SI", table_name="Acc_Sales_Inv_Main", fin_year=fin_year)
+
+
+def check_trans_no_exists(db: Session, trans_no: str, exclude_trans_no: Optional[str] = None) -> bool:
+    from src.utils.trans_no_helpers import check_trans_no_exists
+    return check_trans_no_exists(db=db, table_name="Acc_Sales_Inv_Main", trans_no=trans_no, exclude_trans_no=exclude_trans_no)
+
+
 def create_sales_invoice(db: Session, payload):
     try:
         trans_no = (payload.TransNo or "").strip()
-        if not trans_no or trans_no.startswith("SINV-2026-"):
-            year = datetime.now().strftime("%y")
-            next_year = str((int(year) + 1) % 100).zfill(2)
-            fin_tag = f"{year}-{next_year}"
-            # Kept compatible with the original numbering scheme; protect against races
-            # with a unique constraint/retry or a dedicated sequence in production.
-            count = db.execute(text("SELECT COUNT(*) FROM Acc_Sales_Inv_Main WITH (UPDLOCK, HOLDLOCK)")).scalar() or 0
-            trans_no = f"SINV/{fin_tag}/{count + 1:05d}"
+        if not trans_no or trans_no.startswith("SINV-2026-") or trans_no.startswith("SINV/"):
+            fin_year_hint = getattr(payload, "FinYearVal", None) or getattr(payload, "TransDate", None)
+            trans_no = get_next_trans_no(db, fin_year=fin_year_hint)
 
         exists = db.execute(text("""
             SELECT 1 FROM Acc_Sales_Inv_Main WHERE TransNo = :trans_no

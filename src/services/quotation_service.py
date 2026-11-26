@@ -488,6 +488,16 @@ class QuotationService:
     # =========================================================
 
     @staticmethod
+    def get_next_trans_no(db: Session, fin_year: Optional[str] = None) -> str:
+        from src.utils.trans_no_helpers import generate_next_trans_no
+        return generate_next_trans_no(db=db, prefix="SQ", table_name="Acc_Quotation_Main", fin_year=fin_year)
+
+    @staticmethod
+    def check_trans_no_exists(db: Session, trans_no: str, exclude_trans_no: Optional[str] = None) -> bool:
+        from src.utils.trans_no_helpers import check_trans_no_exists
+        return check_trans_no_exists(db=db, table_name="Acc_Quotation_Main", trans_no=trans_no, exclude_trans_no=exclude_trans_no)
+
+    @staticmethod
     def create_quotation(
         db: Session,
         payload: QuotationCreate,
@@ -495,25 +505,11 @@ class QuotationService:
 
         QuotationService.ensure_tables_exist(db)
 
-        trans_no = payload.TransNo
+        trans_no = (payload.TransNo or "").strip()
 
         if not trans_no:
-
-            count = (
-                db.execute(
-                    text(
-                        """
-                        SELECT COUNT(1)
-                        FROM Acc_Quotation_Main
-                        """
-                    )
-                ).scalar()
-                or 0
-            )
-
-            trans_no = (
-                f"QUO-2026-{str(count + 1).zfill(3)}"
-            )
+            fin_year_hint = getattr(payload, "FinYearVal", None) or getattr(payload, "TransDate", None)
+            trans_no = QuotationService.get_next_trans_no(db, fin_year=fin_year_hint)
 
         duplicate = db.execute(
             text(

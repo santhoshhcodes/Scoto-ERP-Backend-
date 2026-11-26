@@ -70,17 +70,25 @@ def get_customer_portfolio_summary(
 def get_customer_dossier_by_path(
     client_code: str,
     fin_year: Optional[str] = Query(default="ALL"),
+    from_date: Optional[str] = Query(default=None),
+    to_date: Optional[str] = Query(default=None),
+    from_month: Optional[str] = Query(default=None),
+    to_month: Optional[str] = Query(default=None),
     db: Session = Depends(get_mssql_session("db2")),
 ):
     """
     Comprehensive Customer 360 Dossier:
     Includes Customer Master KYC, Quotes, Proformas, Invoices, Tally Receipts,
-    Percentage Milestone Tracking, and Running Ledger.
+    Percentage Milestone Tracking, and Running Ledger with date/month range filtering.
     """
     return CustomerReportService.get_customer_dossier(
         db=db,
         client_code=client_code,
         fin_year=fin_year,
+        from_date=from_date,
+        to_date=to_date,
+        from_month=from_month,
+        to_month=to_month,
     )
 
 
@@ -88,6 +96,10 @@ def get_customer_dossier_by_path(
 def get_customer_dossier_by_query(
     client_code: str = Query(...),
     fin_year: Optional[str] = Query(default="ALL"),
+    from_date: Optional[str] = Query(default=None),
+    to_date: Optional[str] = Query(default=None),
+    from_month: Optional[str] = Query(default=None),
+    to_month: Optional[str] = Query(default=None),
     db: Session = Depends(get_mssql_session("db2")),
 ):
     """
@@ -97,6 +109,10 @@ def get_customer_dossier_by_query(
         db=db,
         client_code=client_code,
         fin_year=fin_year,
+        from_date=from_date,
+        to_date=to_date,
+        from_month=from_month,
+        to_month=to_month,
     )
 
 
@@ -106,6 +122,10 @@ def export_customer_dossier_excel(
     client_code: str,
     fin_year: Optional[str] = Query(default="ALL"),
     tab: Optional[str] = Query(default="ALL"),
+    from_date: Optional[str] = Query(default=None),
+    to_date: Optional[str] = Query(default=None),
+    from_month: Optional[str] = Query(default=None),
+    to_month: Optional[str] = Query(default=None),
     db: Session = Depends(get_mssql_session("db2")),
 ):
     """
@@ -117,10 +137,19 @@ def export_customer_dossier_excel(
         client_code=client_code,
         fin_year=fin_year,
         tab=tab,
+        from_date=from_date,
+        to_date=to_date,
+        from_month=from_month,
+        to_month=to_month,
     )
     safe_code = client_code.replace("/", "_").replace("\\", "_").replace(" ", "_").strip()
     safe_fy = (fin_year or "ALL").replace("/", "_").replace("\\", "_").replace(" ", "_").strip()
-    filename = f"Customer_Dossier_{safe_code}_{safe_fy}.xlsx"
+    month_suffix = ""
+    if from_month and to_month:
+        safe_fm = str(from_month).replace("/", "_").replace("-", "").strip()
+        safe_tm = str(to_month).replace("/", "_").replace("-", "").strip()
+        month_suffix = f"_{safe_fm}_to_{safe_tm}"
+    filename = f"Customer_Dossier_{safe_code}_{safe_fy}{month_suffix}.xlsx"
     headers = {
         "Content-Disposition": f'attachment; filename="{filename}"'
     }

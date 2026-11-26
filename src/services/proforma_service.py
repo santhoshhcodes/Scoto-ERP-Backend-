@@ -296,21 +296,18 @@ class ProformaInvoiceService:
         return invoice
 
     @staticmethod
-    def _generate_trans_no(db: Session) -> str:
-        """
-        Generate the existing PI-2026-001 style number.
-        COUNT-based numbering can collide during concurrent requests.
-        Use a transaction-safe sequence for production.
-        """
-        count = db.execute(
-            text("""
-                SELECT COUNT(1)
-                FROM Acc_Proforma_Inv_Main
-                WHERE TransNo LIKE 'PI-2026-%'
-            """)
-        ).scalar_one()
+    def get_next_trans_no(db: Session, fin_year: Optional[str] = None) -> str:
+        from src.utils.trans_no_helpers import generate_next_trans_no
+        return generate_next_trans_no(db=db, prefix="SP", table_name="Acc_Proforma_Inv_Main", fin_year=fin_year)
 
-        return f"PI-2026-{int(count) + 1:03d}"
+    @staticmethod
+    def check_trans_no_exists(db: Session, trans_no: str, exclude_trans_no: Optional[str] = None) -> bool:
+        from src.utils.trans_no_helpers import check_trans_no_exists
+        return check_trans_no_exists(db=db, table_name="Acc_Proforma_Inv_Main", trans_no=trans_no, exclude_trans_no=exclude_trans_no)
+
+    @classmethod
+    def _generate_trans_no(cls, db: Session, fin_year: Optional[str] = None) -> str:
+        return cls.get_next_trans_no(db, fin_year)
 
     @staticmethod
     def _approval_value(value: Optional[str]) -> str:
@@ -379,7 +376,10 @@ class ProformaInvoiceService:
         try:
             cls.ensure_tables_exist(db)
 
-            trans_no = payload.TransNo or cls._generate_trans_no(db)
+            trans_no = (payload.TransNo or "").strip()
+            if not trans_no:
+                fin_year_hint = getattr(payload, "FinYearVal", None) or getattr(payload, "TransDate", None)
+                trans_no = cls.get_next_trans_no(db, fin_year=fin_year_hint)
 
             duplicate = db.execute(
                 text("""

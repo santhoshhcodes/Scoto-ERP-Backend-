@@ -164,6 +164,10 @@ class ReceiptService:
             status_label = inv.get("payment_status", "PENDING")
             trans_no = inv.get("trans_no") or inv.get("TransNo")
 
+            # Do not return already settled / paid invoices as open
+            if status_label == "PAID" or bal_due <= 0.01:
+                continue
+
             # Fetch sub-items from Acc_Sales_Inv_Sub
             sub_rows = db.execute(text("""
                 SELECT ProductType, ItemCode, HSNCode, Qty, Rate, ItemValue, GST, CGST, SGST, IGST, NetAmount
@@ -230,6 +234,10 @@ class ReceiptService:
             adv_collected = _to_float(ms.get("advance_collected")) if ms else 0.0
             bal_pending = max(0.0, total_amt - adv_collected)
 
+            # Do not return already settled proformas as open
+            if bal_pending <= 0.01:
+                continue
+
             # Query Proforma Main & Sub items
             pf_main = db.execute(text("""
                 SELECT TotalItemAmount, TotalCGSTAmount, TotalSGSTAmount, TotalIGSTAmount, NetAmount
@@ -289,6 +297,10 @@ class ReceiptService:
             matched_ms = [m for m in milestones if str(m.get("quotation_no") or "").strip() == q_no]
             adv_collected = sum(_to_float(m.get("advance_collected")) for m in matched_ms)
             bal_pending = max(0.0, total_amt - adv_collected)
+
+            # Do not return already settled quotations as open
+            if bal_pending <= 0.01:
+                continue
 
             # Query Quotation Main & Sub items
             q_main = db.execute(text("""
@@ -373,6 +385,42 @@ class ReceiptService:
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="Gross Settlement Amount must be greater than zero.",
             )
+
+        # Validate that allocated documents are open and not already fully paid
+        if payload.Allocations:
+            cust_identifier = (payload.CustomerCode or payload.CustomerName or "").strip()
+            if cust_identifier:
+                doc_dossier = CustomerReportService.get_customer_dossier(db, cust_identifier, fin_year="ALL")
+                inv_map = {}
+                for i in doc_dossier.get("invoices_breakdown", []):
+                    t_no = str(i.get("TransNo") or i.get("trans_no") or "").strip()
+                    i_no = str(i.get("InvoiceNo") or i.get("invoice_no") or "").strip()
+                    if t_no:
+                        inv_map[t_no.lower()] = i
+                    if i_no:
+                        inv_map[i_no.lower()] = i
+
+                for alloc in payload.Allocations:
+                    alloc_gross = round(_to_float(alloc.AllocatedAmount), 2)
+                    doc_type = (alloc.DocType or "").upper()
+                    doc_no_clean = str(alloc.DocNo or "").strip().lower()
+                    sec_no_clean = str(alloc.SecondaryDocNo or "").strip().lower()
+
+                    if "INVOICE" in doc_type or doc_type == "SALES_INVOICE":
+                        matched_inv = inv_map.get(doc_no_clean) or (inv_map.get(sec_no_clean) if sec_no_clean else None)
+                        if matched_inv:
+                            curr_bal = _to_float(matched_inv.get("balance_due"))
+                            inv_status = str(matched_inv.get("payment_status") or "").upper()
+                            if inv_status == "PAID" or curr_bal <= 0.01:
+                                raise HTTPException(
+                                    status_code=status.HTTP_400_BAD_REQUEST,
+                                    detail=f"Sales Invoice '{alloc.DocNo}' is already fully paid. Duplicate payments are not allowed.",
+                                )
+                            if alloc_gross > round(curr_bal + 0.05, 2):
+                                raise HTTPException(
+                                    status_code=status.HTTP_400_BAD_REQUEST,
+                                    detail=f"Allocated settlement amount (₹{alloc_gross:,.2f}) exceeds the remaining balance due (₹{curr_bal:,.2f}) for Invoice '{alloc.DocNo}'.",
+                                )
 
         # Date and Financial Year
         dt, trans_date_formatted, trans_date_iso = _parse_date(payload.ReceiptDate)

@@ -47,6 +47,40 @@ def list_sales_invoices(
     )
 
 
+# =========================================================
+# NEXT TRANSACTION NUMBER & EXISTENCE CHECK
+# =========================================================
+
+@router.get("/next-trans-no")
+def get_next_sales_invoice_trans_no(
+    fin_year: Optional[str] = Query(default=None),
+    db: Session = Depends(get_mssql_session("db2")),
+):
+    from src.utils.trans_no_helpers import get_fin_year_code
+    next_no = service.get_next_trans_no(db=db, fin_year=fin_year)
+    return {
+        "success": True,
+        "trans_no": next_no,
+        "fin_year_code": get_fin_year_code(fin_year),
+    }
+
+
+@router.get("/check-trans-no")
+def check_sales_invoice_trans_no(
+    trans_no: str = Query(..., description="Sales Invoice TransNo to check"),
+    exclude_trans_no: Optional[str] = Query(default=None, description="Current TransNo if editing"),
+    db: Session = Depends(get_mssql_session("db2")),
+):
+    exists = service.check_trans_no_exists(db=db, trans_no=trans_no, exclude_trans_no=exclude_trans_no)
+    return {
+        "success": True,
+        "trans_no": trans_no,
+        "exists": exists,
+        "available": not exists,
+        "message": f"Sales Invoice '{trans_no}' already exists in database." if exists else f"Sales Invoice '{trans_no}' is available.",
+    }
+
+
 @router.get("/meta/proforma-invoices")
 def list_proforma_invoices(
     company_code: Optional[str] = Query(default="SCT"),

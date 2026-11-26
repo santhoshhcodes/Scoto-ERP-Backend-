@@ -1,6 +1,7 @@
 from typing import Any, Dict, List, Optional, Tuple
 from decimal import Decimal
 from datetime import datetime, date
+import calendar
 import re
 from sqlalchemy import text
 from sqlalchemy.orm import Session
@@ -21,6 +22,91 @@ class CustomerReportService:
             return float(val)
         except Exception:
             return 0.0
+
+    @staticmethod
+    def _normalize_date(d_str: Any) -> Optional[str]:
+        """Converts YYYY-MM-DD or DD/MM/YYYY into ISO YYYY-MM-DD string."""
+        if not d_str:
+            return None
+        s = str(d_str).strip()
+        m1 = re.match(r"^(\d{4})[-/.](\d{1,2})[-/.](\d{1,2})", s)
+        if m1:
+            return f"{int(m1.group(1)):04d}-{int(m1.group(2)):02d}-{int(m1.group(3)):02d}"
+        m2 = re.match(r"^(\d{1,2})[-/.](\d{1,2})[-/.](\d{4})", s)
+        if m2:
+            return f"{int(m2.group(3)):04d}-{int(m2.group(2)):02d}-{int(m2.group(1)):02d}"
+        return None
+
+    @staticmethod
+    def resolve_period_bounds(
+        fin_year: str = "ALL",
+        from_month: Optional[str] = None,
+        to_month: Optional[str] = None,
+        from_date: Optional[str] = None,
+        to_date: Optional[str] = None,
+    ) -> Tuple[Optional[str], Optional[str], str, str]:
+        """
+        Resolves (calc_from_date, calc_to_date, period_display, period_range).
+        For an FY like '2026-2027', returns:
+          - full year: ('2026-04-01', '2027-03-31', 'April 2026 to March 2027 (FY 2026-2027)', 'April 2026 to March 2027')
+          - custom months: ('2026-04-01', '2026-11-30', 'April 2026 to November 2026 (FY 2026-2027)', 'April 2026 to November 2026')
+        """
+        clean_fy = re.sub(r"(?i)\bfy[:\s]*", "", fin_year or "ALL").strip()
+        is_all = clean_fy.upper() in ("ALL", "")
+        y1, y2 = None, None
+        if not is_all:
+            m = re.search(r"(\d{4})[-_](\d{4})", clean_fy)
+            if m:
+                y1, y2 = int(m.group(1)), int(m.group(2))
+            else:
+                m2 = re.search(r"(\d{2})[-_](\d{2})", clean_fy)
+                if m2:
+                    y1, y2 = 2000 + int(m2.group(1)), 2000 + int(m2.group(2))
+
+        calc_from = from_date
+        if not calc_from:
+            if from_month and "-" in str(from_month):
+                p = str(from_month).split("-")
+                calc_from = f"{int(p[0]):04d}-{int(p[1]):02d}-01"
+            elif from_month and str(from_month).isdigit() and y1:
+                mo = int(from_month)
+                yr = y1 if mo >= 4 else y2
+                calc_from = f"{yr:04d}-{mo:02d}-01"
+            elif y1:
+                calc_from = f"{y1:04d}-04-01"
+
+        calc_to = to_date
+        if not calc_to:
+            if to_month and "-" in str(to_month):
+                p = str(to_month).split("-")
+                yr, mo = int(p[0]), int(p[1])
+                last_day = calendar.monthrange(yr, mo)[1]
+                calc_to = f"{yr:04d}-{mo:02d}-{last_day:02d}"
+            elif to_month and str(to_month).isdigit() and y2:
+                mo = int(to_month)
+                yr = y1 if mo >= 4 else y2
+                last_day = calendar.monthrange(yr, mo)[1]
+                calc_to = f"{yr:04d}-{mo:02d}-{last_day:02d}"
+            elif y2:
+                calc_to = f"{y2:04d}-03-31"
+
+        if is_all and not calc_from and not calc_to:
+            period_display = "All Financial Years"
+            period_range = "All Financial Years"
+        else:
+            try:
+                d1 = date.fromisoformat(calc_from) if calc_from else None
+                d2 = date.fromisoformat(calc_to) if calc_to else None
+                s1 = d1.strftime("%B %Y") if d1 else "Beginning"
+                s2 = d2.strftime("%B %Y") if d2 else "Present"
+                period_range = f"{s1} to {s2}"
+                fy_suffix = f" (FY {y1}-{y2})" if (y1 and y2) else ""
+                period_display = f"{period_range}{fy_suffix}"
+            except Exception:
+                period_display = clean_fy
+                period_range = clean_fy
+
+        return calc_from, calc_to, period_display, period_range
 
     @staticmethod
     def _normalize_approval_status(raw_status: Any, default: str = "Pending") -> str:
@@ -201,6 +287,10 @@ class CustomerReportService:
         db: Session,
         client_code: str,
         fin_year: Optional[str] = "ALL",
+        from_date: Optional[str] = None,
+        to_date: Optional[str] = None,
+        from_month: Optional[str] = None,
+        to_month: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
         Generates the complete 360 customer financial dossier.
@@ -222,22 +312,64 @@ class CustomerReportService:
                 HouseNo,
                 Add1,
                 Add2,
+                Area,
                 City,
                 State,
                 PinCode,
                 Country,
                 ContectName,
+                ContectNo,
                 MobileNo,
+                TelNo,
                 MailID,
                 GSTNo,
                 PanNo,
                 ISNULL(OpeningBalance, 0) AS OpeningBalance,
                 ISNULL(NULLIF(LTRIM(RTRIM(BalanceType)), ''), 'Dr') AS BalanceType
             FROM dbo.Acc_Mst_Ledger
-            WHERE (LedgerCode = :code OR LedgerName = :code)
+            WHERE (
+                LTRIM(RTRIM(LedgerCode)) = :code
+                OR LTRIM(RTRIM(LedgerName)) = :code
+                OR LOWER(LTRIM(RTRIM(LedgerName))) = :code_lower
+            )
               AND Status <> 'Delete'
         """
-        ledger_row = db.execute(text(ledger_sql), {"code": code}).mappings().first()
+        ledger_row = db.execute(text(ledger_sql), {"code": code, "code_lower": code.lower()}).mappings().first()
+        if not ledger_row:
+            # Try fuzzy match in Acc_Mst_Ledger by name before other fallbacks
+            fuzzy_sql = """
+                SELECT TOP 1
+                    LedgerCode,
+                    LedgerName,
+                    CustomerUnit,
+                    ParentLedgerCode,
+                    ChequePrintName,
+                    AccountType AS AccLedgerHeaderName,
+                    LedgerGrpName,
+                    LedgerType,
+                    HouseNo,
+                    Add1,
+                    Add2,
+                    Area,
+                    City,
+                    State,
+                    PinCode,
+                    Country,
+                    ContectName,
+                    ContectNo,
+                    MobileNo,
+                    TelNo,
+                    MailID,
+                    GSTNo,
+                    PanNo,
+                    ISNULL(OpeningBalance, 0) AS OpeningBalance,
+                    ISNULL(NULLIF(LTRIM(RTRIM(BalanceType)), ''), 'Dr') AS BalanceType
+                FROM dbo.Acc_Mst_Ledger
+                WHERE (LedgerName LIKE :code_like OR ChequePrintName LIKE :code_like)
+                  AND Status <> 'Delete'
+            """
+            ledger_row = db.execute(text(fuzzy_sql), {"code_like": f"%{code}%"}).mappings().first()
+
         if not ledger_row:
             # Fallback to General Ledger
             gen_sql = """
@@ -248,19 +380,28 @@ class CustomerReportService:
                     AccLedgerHeaderName,
                     AccGroupName AS LedgerGrpName,
                     'General Ledger' AS LedgerType,
+                    '' AS HouseNo,
+                    '' AS Add1,
+                    '' AS Add2,
+                    '' AS Area,
+                    '' AS ContectName,
+                    '' AS ContectNo,
+                    '' AS TelNo,
                     '' AS GSTNo,
                     '' AS PanNo,
                     '' AS City,
                     '' AS State,
+                    '' AS PinCode,
+                    '' AS Country,
                     '' AS MobileNo,
                     '' AS MailID,
                     ISNULL(OpeningBalance, 0) AS OpeningBalance,
                     ISNULL(NULLIF(LTRIM(RTRIM(BalanceType)), ''), 'Dr') AS BalanceType
                 FROM dbo.Acc_Mst_GeneralLedger
-                WHERE (AccGenLdgCode = :code OR AccGenLdgName = :code)
+                WHERE (LTRIM(RTRIM(AccGenLdgCode)) = :code OR LTRIM(RTRIM(AccGenLdgName)) = :code OR LOWER(LTRIM(RTRIM(AccGenLdgName))) = :code_lower)
                   AND Status <> 'Delete'
             """
-            ledger_row = db.execute(text(gen_sql), {"code": code}).mappings().first()
+            ledger_row = db.execute(text(gen_sql), {"code": code, "code_lower": code.lower()}).mappings().first()
 
         if not ledger_row:
             # Fallback to Sales Invoices / Transactions if client is known there
@@ -272,10 +413,19 @@ class CustomerReportService:
                     'Domestic Customer' AS AccLedgerHeaderName,
                     'Customer' AS LedgerGrpName,
                     'Customer' AS LedgerType,
+                    '' AS HouseNo,
+                    '' AS Add1,
+                    '' AS Add2,
+                    '' AS Area,
+                    '' AS ContectName,
+                    '' AS ContectNo,
+                    '' AS TelNo,
                     GST AS GSTNo,
                     '' AS PanNo,
                     '' AS City,
                     '' AS State,
+                    '' AS PinCode,
+                    '' AS Country,
                     '' AS MobileNo,
                     '' AS MailID,
                     0 AS OpeningBalance,
@@ -295,10 +445,19 @@ class CustomerReportService:
                         'Domestic Customer' AS AccLedgerHeaderName,
                         'Customer' AS LedgerGrpName,
                         'Customer' AS LedgerType,
+                        '' AS HouseNo,
+                        '' AS Add1,
+                        '' AS Add2,
+                        '' AS Area,
+                        '' AS ContectName,
+                        '' AS ContectNo,
+                        '' AS TelNo,
                         '' AS GSTNo,
                         '' AS PanNo,
                         '' AS City,
                         '' AS State,
+                        '' AS PinCode,
+                        '' AS Country,
                         '' AS MobileNo,
                         '' AS MailID,
                         0 AS OpeningBalance,
@@ -317,15 +476,66 @@ class CustomerReportService:
             )
 
         customer = dict(ledger_row)
-        c_code = customer["LedgerCode"]
-        c_name = customer["LedgerName"]
+        c_code = (customer.get("LedgerCode") or "").strip()
+        c_name = (customer.get("LedgerName") or "").strip()
         c_name_clean = c_name.strip()
         c_name_like = f"%{c_name_clean}%"
+
+        # 1.1 Ensure GSTNo is populated: if missing or blank in Ledger Master, check Sales Invoices
+        raw_gst = (customer.get("GSTNo") or "").strip()
+        if not raw_gst or raw_gst.lower() in ("none", "null", "-", "n/a", "na"):
+            try:
+                inv_gst_row = db.execute(text("""
+                    SELECT TOP 1 GST 
+                    FROM dbo.Acc_Sales_Inv_Main 
+                    WHERE (CustomerCode = :code OR CustomerName = :name OR CustomerName LIKE :name_like)
+                      AND GST IS NOT NULL AND LTRIM(RTRIM(GST)) <> ''
+                      AND (Status IS NULL OR Status <> 'Delete')
+                    ORDER BY InvoiceDate DESC, TransNo DESC
+                """), {"code": c_code, "name": c_name_clean, "name_like": c_name_like}).fetchone()
+                if inv_gst_row and inv_gst_row[0] and str(inv_gst_row[0]).strip():
+                    customer["GSTNo"] = str(inv_gst_row[0]).strip()
+                    raw_gst = customer["GSTNo"]
+            except Exception:
+                pass
+
+        # 1.2 Ensure PanNo is populated: if missing or blank, derive from 15-digit GSTIN (chars 3-12)
+        raw_pan = (customer.get("PanNo") or "").strip()
+        if (not raw_pan or raw_pan.lower() in ("none", "null", "-", "n/a", "na")) and raw_gst:
+            clean_gst = raw_gst.upper().strip()
+            if len(clean_gst) >= 12:
+                candidate_pan = clean_gst[2:12]
+                if len(candidate_pan) == 10 and candidate_pan[:5].isalpha():
+                    customer["PanNo"] = candidate_pan
+
+        # 1.3 Phone fallback from alternate contact fields
+        cur_phone = (customer.get("MobileNo") or "").strip()
+        if not cur_phone or cur_phone.lower() in ("none", "null", "-"):
+            for alt_ph in (customer.get("ContectNo"), customer.get("TelNo")):
+                if alt_ph and str(alt_ph).strip() and str(alt_ph).strip().lower() not in ("none", "null", "-"):
+                    customer["MobileNo"] = str(alt_ph).strip()
+                    break
+
+        # 1.4 Contact Person fallback
+        cur_contact = (customer.get("ContectName") or "").strip()
+        if not cur_contact or cur_contact.lower() in ("none", "null", "-"):
+            for alt_cn in (customer.get("ContactName"), customer.get("ContactPerson"), customer.get("ChequePrintName")):
+                if alt_cn and str(alt_cn).strip() and str(alt_cn).strip().lower() not in ("none", "null", "-") and str(alt_cn).strip() != c_name_clean:
+                    customer["ContectName"] = str(alt_cn).strip()
+                    break
 
         core_name = re.sub(r"(?i)\s*(pvt\.?\s*ltd\.?|private\s*limited|p\.?\s*ltd\.?|limited|ltd\.?)\s*\.*$", "", c_name_clean).strip()
         c_core_like = f"%{core_name}%" if len(core_name) >= 4 else c_name_like
 
         fy_raw = (fin_year or "ALL").strip()
+        calc_from_date, calc_to_date, period_display, period_range = cls.resolve_period_bounds(
+            fin_year=fy_raw,
+            from_month=from_month,
+            to_month=to_month,
+            from_date=from_date,
+            to_date=to_date,
+        )
+
         is_all = 1 if fy_raw.upper() in ("ALL", "") else 0
 
         # Clean any prefix like "FY " or "FY: "
@@ -370,7 +580,7 @@ class CustomerReportService:
             "name_lower": c_name_clean.lower(),
             "name_like": c_name_like,
             "core_like": c_core_like,
-            "is_all": is_all,
+            "is_all": 1,  # Retrieve all customer documents so Python partitions prior vs period by exact date
             "fy_dash": fy_dash,
             "fy_under": fy_under,
             "year_code": year_code,
@@ -399,17 +609,9 @@ class CustomerReportService:
                 OR (:code = '' AND (LOWER(LTRIM(RTRIM(CustomerName))) = :name_lower OR CustomerName LIKE :name_like OR CustomerName LIKE :core_like))
             )
               AND Status <> 'Delete'
-              AND (
-                  :is_all = 1
-                  OR REPLACE(LTRIM(RTRIM(FinYearVal)), '_', '-') = :fy_dash
-                  OR REPLACE(LTRIM(RTRIM(FinYearVal)), '-', '_') = :fy_under
-                  OR LTRIM(RTRIM(FinYearCode)) = :fy_dash
-                  OR LTRIM(RTRIM(FinYearCode)) = :fy_under
-                  OR (:year_code <> '' AND LTRIM(RTRIM(FinYearCode)) = :year_code)
-              )
             ORDER BY TransDate DESC, TransNo DESC
         """
-        quotes = [dict(r) for r in db.execute(text(quote_sql), params).mappings().all()]
+        raw_quotes = [dict(r) for r in db.execute(text(quote_sql), params).mappings().all()]
 
         # 3. Proforma Invoices
         proforma_sql = """
@@ -432,17 +634,9 @@ class CustomerReportService:
                 OR (:code = '' AND (LOWER(LTRIM(RTRIM(CustomerName))) = :name_lower OR CustomerName LIKE :name_like OR CustomerName LIKE :core_like))
             )
               AND Status <> 'Delete'
-              AND (
-                  :is_all = 1
-                  OR REPLACE(LTRIM(RTRIM(FinYearVal)), '_', '-') = :fy_dash
-                  OR REPLACE(LTRIM(RTRIM(FinYearVal)), '-', '_') = :fy_under
-                  OR LTRIM(RTRIM(FinYearCode)) = :fy_dash
-                  OR LTRIM(RTRIM(FinYearCode)) = :fy_under
-                  OR (:year_code <> '' AND LTRIM(RTRIM(FinYearCode)) = :year_code)
-              )
             ORDER BY TransDate DESC, TransNo DESC
         """
-        proformas = [dict(r) for r in db.execute(text(proforma_sql), params).mappings().all()]
+        raw_proformas = [dict(r) for r in db.execute(text(proforma_sql), params).mappings().all()]
 
         # 4. Sales Invoices
         sales_inv_sql = """
@@ -470,25 +664,9 @@ class CustomerReportService:
                 OR (:code = '' AND (LOWER(LTRIM(RTRIM(CustomerName))) = :name_lower OR CustomerName LIKE :name_like OR CustomerName LIKE :core_like))
             )
               AND Status <> 'Delete'
-              AND (
-                  :is_all = 1
-                  OR REPLACE(LTRIM(RTRIM(FinYearVal)), '_', '-') = :fy_dash
-                  OR REPLACE(LTRIM(RTRIM(FinYearVal)), '-', '_') = :fy_under
-                  OR LTRIM(RTRIM(FinYearCode)) = :fy_dash
-                  OR LTRIM(RTRIM(FinYearCode)) = :fy_under
-                  OR (:year_code <> '' AND LTRIM(RTRIM(FinYearCode)) = :year_code)
-              )
             ORDER BY InvoiceDate DESC, TransNo DESC
         """
-        sales_invoices = [dict(r) for r in db.execute(text(sales_inv_sql), params).mappings().all()]
-
-        # Standardize ApprovalStatus (never show raw 0 or 1)
-        for q in quotes:
-            q["ApprovalStatus"] = cls._normalize_approval_status(q.get("ApprovalStatus"), default="Pending")
-        for p in proformas:
-            p["ApprovalStatus"] = cls._normalize_approval_status(p.get("ApprovalStatus"), default="Pending")
-        for s in sales_invoices:
-            s["ApprovalStatus"] = cls._normalize_approval_status(s.get("ApprovalStatus"), default="Approved")
+        raw_sales_invoices = [dict(r) for r in db.execute(text(sales_inv_sql), params).mappings().all()]
 
         # 5. Tally Transactions
         tally_sql = """
@@ -510,22 +688,94 @@ class CustomerReportService:
             )
               AND ISNULL(Status, '') <> 'Delete'
               AND ISNULL(TransType, '') <> 'Opening Balance'
-              AND (
-                  :is_all = 1
-                  OR REPLACE(LTRIM(RTRIM(FinYearVal)), '_', '-') = :fy_dash
-                  OR REPLACE(LTRIM(RTRIM(FinYearVal)), '-', '_') = :fy_under
-                  OR LTRIM(RTRIM(FinYearCode)) = :fy_dash
-                  OR LTRIM(RTRIM(FinYearCode)) = :fy_under
-                  OR (:year_code <> '' AND LTRIM(RTRIM(FinYearCode)) = :year_code)
-              )
             ORDER BY TransDate DESC, TransNo DESC
         """
-        tally_vouchers = [dict(r) for r in db.execute(text(tally_sql), params).mappings().all()]
+        raw_tally_vouchers = [dict(r) for r in db.execute(text(tally_sql), params).mappings().all()]
+
+        # Standardize ApprovalStatus across all items
+        for q in raw_quotes:
+            q["ApprovalStatus"] = cls._normalize_approval_status(q.get("ApprovalStatus"), default="Pending")
+        for p in raw_proformas:
+            p["ApprovalStatus"] = cls._normalize_approval_status(p.get("ApprovalStatus"), default="Pending")
+        for s in raw_sales_invoices:
+            s["ApprovalStatus"] = cls._normalize_approval_status(s.get("ApprovalStatus"), default="Approved")
+
+        # Partition records by date:
+        # Transactions prior to calc_from_date roll into Opening Balance
+        prior_debits = 0.0
+        prior_credits = 0.0
+
+        quotes = []
+        for q in raw_quotes:
+            nd = cls._normalize_date(q.get("TransDate"))
+            if calc_from_date and nd and nd < calc_from_date:
+                continue
+            if calc_to_date and nd and nd > calc_to_date:
+                continue
+            quotes.append(q)
+
+        proformas = []
+        for p in raw_proformas:
+            nd = cls._normalize_date(p.get("TransDate"))
+            if calc_from_date and nd and nd < calc_from_date:
+                continue
+            if calc_to_date and nd and nd > calc_to_date:
+                continue
+            proformas.append(p)
+
+        sales_invoices = []
+        for s in raw_sales_invoices:
+            nd = cls._normalize_date(s.get("InvoiceDate") or s.get("TransDate"))
+            amt = cls._to_float(s.get("NetAmount"))
+            if calc_from_date and nd and nd < calc_from_date:
+                prior_debits += amt
+                continue
+            if calc_to_date and nd and nd > calc_to_date:
+                continue
+            sales_invoices.append(s)
+
+        tally_vouchers = []
+        for t in raw_tally_vouchers:
+            nd = cls._normalize_date(t.get("TransDate"))
+            cr = cls._to_float(t.get("CreditAmount"))
+            dr = cls._to_float(t.get("DebitAmount"))
+            trans_no = str(t.get("TransNo") or "").strip()
+            trans_type = str(t.get("TransType") or "").strip()
+            is_erp = trans_no.startswith("R-BK/") or trans_no.startswith("R-CS/") or trans_no.startswith("R-")
+            is_receipt = is_erp or (trans_type.lower() in ("receipt", "cash receipts", "bank receipt", "coral receipt entry")) or cr > 0
+
+            if calc_from_date and nd and nd < calc_from_date:
+                if is_receipt or cr > 0:
+                    prior_credits += cr
+                elif dr > 0:
+                    prior_debits += dr
+                continue
+            if calc_to_date and nd and nd > calc_to_date:
+                continue
+            tally_vouchers.append(t)
+
+        # Ensure customer GSTNo and PanNo are populated from loaded sales invoices if still missing
+        if not (customer.get("GSTNo") or "").strip() or str(customer.get("GSTNo")).strip().lower() in ("none", "null", "-", "n/a", "na"):
+            for s in raw_sales_invoices:
+                si_gst = (s.get("GST") or "").strip()
+                if si_gst and si_gst.lower() not in ("none", "null", "-", "n/a", "na"):
+                    customer["GSTNo"] = si_gst
+                    if (not customer.get("PanNo") or str(customer.get("PanNo")).strip().lower() in ("none", "null", "-", "n/a", "na")) and len(si_gst) >= 12:
+                        cand_pan = si_gst.upper()[2:12]
+                        if len(cand_pan) == 10 and cand_pan[:5].isalpha():
+                            customer["PanNo"] = cand_pan
+                    break
 
         # 6. Compute Milestone Breakdown (% Advance & Reconciliation)
         milestones = []
         all_receipt_vouchers = [
             v for v in tally_vouchers
+            if v.get("TransType", "").strip().lower() in ("receipt", "cash receipts", "bank receipt", "coral receipt entry")
+               or cls._to_float(v.get("CreditAmount")) > 0
+        ]
+        # Complete lifetime receipts for accurate invoice payment settlement reconciliation
+        all_lifetime_receipts = [
+            v for v in raw_tally_vouchers
             if v.get("TransType", "").strip().lower() in ("receipt", "cash receipts", "bank receipt", "coral receipt entry")
                or cls._to_float(v.get("CreditAmount")) > 0
         ]
@@ -674,45 +924,14 @@ class CustomerReportService:
         op_type = str(customer.get("BalanceType") or "Dr").strip()
         master_balance = op_bal if op_type.lower() == "dr" else -op_bal
 
-        prior_debits = 0.0
-        prior_credits = 0.0
-        parts = fy_dash.split("-")
-        if is_all == 0 and len(parts) == 2 and len(parts[0]) == 4:
-            prior_tally_sql = """
-                SELECT 
-                    ISNULL(SUM(DebitAmount), 0) AS PriorDebit,
-                    ISNULL(SUM(CreditAmount), 0) AS PriorCredit
-                FROM dbo.Acc_Trans_All
-                WHERE ((:code <> '' AND LeaderCode = :code) OR LOWER(LTRIM(RTRIM(LedgerName))) = :name_lower OR LedgerName LIKE :name_like OR LedgerName LIKE :core_like)
-                  AND ISNULL(Status, '') <> 'Delete'
-                  AND ISNULL(TransType, '') <> 'Opening Balance'
-                  AND (
-                      (REPLACE(LTRIM(RTRIM(FinYearVal)), '_', '-') < :fy_dash AND LTRIM(RTRIM(FinYearVal)) <> '')
-                      OR (:year_code <> '' AND ISNUMERIC(FinYearCode) = 1 AND CAST(FinYearCode AS INT) < CAST(:year_code AS INT))
-                  )
-            """
-            prior_tally = db.execute(text(prior_tally_sql), params).mappings().first()
-            if prior_tally:
-                prior_debits += cls._to_float(prior_tally.get("PriorDebit"))
-                prior_credits += cls._to_float(prior_tally.get("PriorCredit"))
-
-            prior_sales_sql = """
-                SELECT ISNULL(SUM(NetAmount), 0) AS PriorSales
-                FROM dbo.Acc_Sales_Inv_Main
-                WHERE ((:code <> '' AND CustomerCode = :code) OR LOWER(LTRIM(RTRIM(CustomerName))) = :name_lower OR CustomerName LIKE :name_like OR CustomerName LIKE :core_like)
-                  AND Status <> 'Delete'
-                  AND (
-                      (REPLACE(LTRIM(RTRIM(FinYearVal)), '_', '-') < :fy_dash AND LTRIM(RTRIM(FinYearVal)) <> '')
-                      OR (:year_code <> '' AND ISNUMERIC(FinYearCode) = 1 AND CAST(FinYearCode AS INT) < CAST(:year_code AS INT))
-                  )
-            """
-            prior_sales = db.execute(text(prior_sales_sql), params).mappings().first()
-            if prior_sales:
-                prior_debits += cls._to_float(prior_sales.get("PriorSales"))
-
         current_balance = master_balance + (prior_debits - prior_credits)
         op_particulars = "Opening Balance"
-        if is_all == 0 and (prior_debits > 0 or prior_credits > 0):
+        if calc_from_date:
+            if calc_from_date.endswith("-04-01") and is_all == 0:
+                op_particulars = f"Opening Balance (B/F for FY {fy_dash})"
+            else:
+                op_particulars = f"Opening Balance (B/F as of {calc_from_date})"
+        elif is_all == 0 and (prior_debits > 0 or prior_credits > 0):
             op_particulars = f"Opening Balance (B/F for FY {fy_dash})"
 
         running_ledger.append({
@@ -840,18 +1059,12 @@ class CustomerReportService:
                 "credit": cr,
             })
 
-        # Sort ledger rows
+        # Sort ledger rows chronologically using normalized ISO date
         def parse_date_sort(d_str: str):
-            if not d_str:
-                return "00000000"
-            clean = d_str.replace("/", "").replace("-", "")
-            if len(clean) == 8 and clean[:4].isdigit():
-                return clean
-            # If dd/mm/yyyy
-            parts = re.split(r"[/.-]", d_str)
-            if len(parts) == 3 and len(parts[2]) == 4:
-                return f"{parts[2]}{parts[1].zfill(2)}{parts[0].zfill(2)}"
-            return clean
+            if not d_str or str(d_str).strip().lower() in ("opening", "0", ""):
+                return "0000-00-00"
+            norm = cls._normalize_date(d_str)
+            return norm or str(d_str)
 
         ledger_raw.sort(key=lambda x: parse_date_sort(x["date"]))
 
@@ -877,9 +1090,10 @@ class CustomerReportService:
             })
 
         # 9. Calculate Precise Invoice Paid vs Pending Tracking (Explicit + FIFO)
+        # Uses lifetime customer receipts so an invoice settled at any point is properly recognized as PAID
         invoices_breakdown, invoices_summary = cls.calculate_invoices_payment_status(
             sales_invoices=sales_invoices,
-            receipt_vouchers=all_receipt_vouchers,
+            receipt_vouchers=all_lifetime_receipts,
         )
 
         # 10. Key Performance Indicators
@@ -894,6 +1108,12 @@ class CustomerReportService:
             "success": True,
             "customer_info": customer,
             "selected_fin_year": fy_dash if is_all == 0 else "ALL",
+            "period_display": period_display,
+            "period_range": period_range,
+            "from_date": calc_from_date,
+            "to_date": calc_to_date,
+            "from_month": from_month or (calc_from_date[:7] if calc_from_date else None),
+            "to_month": to_month or (calc_to_date[:7] if calc_to_date else None),
             "kpis": {
                 "total_quotations_count": len(quotes),
                 "total_quoted_amount": round(tot_quoted, 2),
